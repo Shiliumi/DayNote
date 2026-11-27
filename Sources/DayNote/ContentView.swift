@@ -916,6 +916,7 @@ private struct WindowConfigurator: NSViewRepresentable {
         window.isOpaque = false
         window.hasShadow = true
         window.hidesOnDeactivate = false
+        window.isReleasedWhenClosed = false
         window.ignoresMouseEvents = false
         window.acceptsMouseMovedEvents = true
         coordinator.startMonitoring(window: window)

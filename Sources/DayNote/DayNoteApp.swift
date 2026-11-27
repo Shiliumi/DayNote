@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct DayNoteApp: App {
+    @NSApplicationDelegateAdaptor(DayNoteAppDelegate.self) private var appDelegate
     @StateObject private var store: TaskStore
     @StateObject private var controller: AppController
 
@@ -14,20 +15,10 @@ struct DayNoteApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("DayNote") {
+        Window("今日便笺", id: "main") {
             ContentView(store: store, controller: controller)
         }
         .defaultSize(width: 370, height: 560)
         .windowStyle(.hiddenTitleBar)
-        .commands {
-            CommandGroup(replacing: .newItem) { }
-        }
-
-        MenuBarExtra {
-            MenuBarContentView(store: store, controller: controller)
-        } label: {
-            MenuBarLabelView(store: store)
-        }
-        .menuBarExtraStyle(.window)
     }
 }

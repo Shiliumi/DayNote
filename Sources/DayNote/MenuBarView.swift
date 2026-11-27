@@ -1,42 +1,6 @@
 import AppKit
 import SwiftUI
 
-struct MenuBarLabelView: View {
-    @ObservedObject var store: TaskStore
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            HStack(spacing: 4) {
-                if let active = store.activeTask {
-                    Image(systemName: "timer")
-                    Text("\(shortTitle(active.title)) \(ContentView.formatDuration(store.activeElapsed(at: context.date)))")
-                        .monospacedDigit()
-                } else {
-                    Image(systemName: "note.text")
-                    let total = store.totalElapsed(on: context.date, at: context.date)
-                    if total > 0 {
-                        Text(compactTotal(total))
-                            .monospacedDigit()
-                    }
-                }
-            }
-        }
-    }
-
-    private func shortTitle(_ title: String) -> String {
-        if title.count <= 8 { return title }
-        return String(title.prefix(7)) + "…"
-    }
-
-    private func compactTotal(_ seconds: TimeInterval) -> String {
-        let mins = Int(seconds) / 60
-        let h = mins / 60
-        let m = mins % 60
-        if h > 0 { return "\(h)h\(m)m" }
-        return "\(m)m"
-    }
-}
-
 struct MenuBarContentView: View {
     @ObservedObject var store: TaskStore
     @ObservedObject var controller: AppController
@@ -66,6 +30,7 @@ struct MenuBarContentView: View {
                     if store.isTimerRunning {
                         Button {
                             store.pauseActiveTimer(at: now)
+                            controller.updateStatusBarTitle()
                         } label: {
                             Label("暂停", systemImage: "pause.fill")
                                 .font(.system(size: 11, weight: .bold, design: .rounded))
@@ -120,6 +85,7 @@ struct MenuBarContentView: View {
 
                                     Button {
                                         store.toggleTimer(for: task.id, on: now, at: now)
+                                        controller.updateStatusBarTitle()
                                     } label: {
                                         Image(systemName: running ? "pause.circle.fill" : "play.circle.fill")
                                             .font(.system(size: 15))

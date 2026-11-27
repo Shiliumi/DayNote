@@ -2,6 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 import Foundation
 import ServiceManagement
+import SwiftUI
 import UserNotifications
 
 @MainActor
@@ -14,7 +15,7 @@ final class AppController: ObservableObject {
     @Published var globalHotkeysEnabled: Bool {
         didSet {
             UserDefaults.standard.set(globalHotkeysEnabled, forKey: Keys.globalHotkeys)
-            updateHotkeys()
+            if hasStarted { updateHotkeys() }
         }
     }
     @Published var sleepProtectionEnabled: Bool {
@@ -35,6 +36,11 @@ final class AppController: ObservableObject {
 
     weak var mainWindow: NSWindow?
     private weak var store: TaskStore?
+    private var hasStarted = false
+
+    private var statusItem: NSStatusItem?
+    private var statusPopover: NSPopover?
+    private var statusTimer: Timer?
 
     private var awayStartedAt: Date?
     private var awayTaskID: UUID?
@@ -69,26 +75,113 @@ final class AppController: ObservableObject {
         self.focusReminderMinutes = defaults.integer(forKey: Keys.focusReminderMinutes)
 
         Self.shared = self
-        installSleepObservers()
-        updateHotkeys()
     }
 
     func attach(store: TaskStore) {
         self.store = store
     }
 
+    /// Called once NSApplication finishes launching so AppKit/Carbon/StatusBar are fully initialized.
+    func startSystemIntegrations() {
+        guard !hasStarted else { return }
+        hasStarted = true
+        setupStatusBarItem()
+        installSleepObservers()
+        updateHotkeys()
+    }
+
+    // MARK: - Native Menu Bar Status Item (NSStatusBar + NSPopover)
+
+    private func setupStatusBarItem() {
+        guard statusItem == nil, let store else { return }
+
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = item.button {
+            button.imagePosition = .imageLeading
+            button.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+            button.target = self
+            button.action = #selector(toggleStatusPopover(_:))
+        }
+        statusItem = item
+
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = true
+        popover.contentViewController = NSHostingController(
+            rootView: MenuBarContentView(store: store, controller: self)
+        )
+        statusPopover = popover
+
+        updateStatusBarTitle()
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.updateStatusBarTitle()
+            }
+        }
+        if let statusTimer {
+            RunLoop.main.add(statusTimer, forMode: .common)
+        }
+    }
+
+    func updateStatusBarTitle() {
+        guard let button = statusItem?.button, let store else { return }
+        let now = Date()
+        if let active = store.activeTask {
+            let symbol = NSImage(systemSymbolName: "timer", accessibilityDescription: "计时中")
+            symbol?.isTemplate = true
+            button.image = symbol
+            let title = shortTitle(active.title)
+            let elapsedText = ContentView.formatDuration(store.activeElapsed(at: now))
+            button.title = " \(title) \(elapsedText)"
+        } else {
+            let symbol = NSImage(systemSymbolName: "note.text", accessibilityDescription: "今日便笺")
+            symbol?.isTemplate = true
+            button.image = symbol
+            let total = store.totalElapsed(on: now, at: now)
+            if total > 0 {
+                let mins = Int(total) / 60
+                let h = mins / 60
+                let m = mins % 60
+                button.title = h > 0 ? " \(h)h\(m)m" : " \(m)m"
+            } else {
+                button.title = ""
+            }
+        }
+    }
+
+    private func shortTitle(_ title: String) -> String {
+        if title.count <= 8 { return title }
+        return String(title.prefix(7)) + "…"
+    }
+
+    @objc private func toggleStatusPopover(_ sender: AnyObject?) {
+        guard let popover = statusPopover, let button = statusItem?.button else { return }
+        if popover.isShown {
+            popover.performClose(sender)
+        } else {
+            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            popover.contentViewController?.view.window?.makeKey()
+        }
+    }
+
+    func closeStatusPopover() {
+        statusPopover?.performClose(nil)
+    }
+
     // MARK: - Window Management
 
     func showMainWindow() {
+        closeStatusPopover()
         NSApp.activate(ignoringOtherApps: true)
-        if let window = mainWindow ?? NSApp.windows.first(where: { $0.canBecomeMain }) {
+        if let window = mainWindow ?? NSApp.windows.first(where: { $0.canBecomeMain && !($0 is NSPanel) }) {
             window.makeKeyAndOrderFront(nil)
             window.orderFrontRegardless()
         }
     }
 
     func toggleMainWindow() {
-        guard let window = mainWindow ?? NSApp.windows.first(where: { $0.canBecomeMain }) else {
+        closeStatusPopover()
+        guard let window = mainWindow ?? NSApp.windows.first(where: { $0.canBecomeMain && !($0 is NSPanel) }) else {
             NSApp.activate(ignoringOtherApps: true)
             return
         }
@@ -347,9 +440,25 @@ final class AppController: ObservableObject {
             toggleMainWindow()
         case 2:
             store?.toggleQuickTimer()
+            updateStatusBarTitle()
         default:
             break
         }
+    }
+}
+
+final class DayNoteAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        Task { @MainActor in
+            AppController.shared?.startSystemIntegrations()
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        Task { @MainActor in
+            AppController.shared?.showMainWindow()
+        }
+        return true
     }
 }
 
