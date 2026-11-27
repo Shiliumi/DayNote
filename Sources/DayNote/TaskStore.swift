@@ -9,6 +9,9 @@ final class TaskStore: ObservableObject {
     @Published private(set) var calendarTags: [String: [CalendarTag]] = [:]
     @Published private(set) var dailyGoals: [String: Int] = [:]
     @Published private(set) var countdowns: [CountdownEvent] = []
+    @Published private(set) var dailyNotes: [String: String] = [:]
+    @Published private(set) var taskTemplates: [TaskTemplate] = []
+    @Published private(set) var pomodoroCounts: [String: Int] = [:]
     @Published var autoBackupDirectoryPath: String = "" {
         didSet {
             defaults.set(autoBackupDirectoryPath, forKey: autoBackupDirKey)
@@ -23,6 +26,9 @@ final class TaskStore: ObservableObject {
     private let calendarTagsKey = "daynote.calendar-tags.v1"
     private let dailyGoalsKey = "daynote.daily-goals.v1"
     private let countdownsKey = "daynote.countdowns.v1"
+    private let dailyNotesKey = "daynote.daily-notes.v1"
+    private let taskTemplatesKey = "daynote.task-templates.v1"
+    private let pomodoroCountsKey = "daynote.pomodoro-counts.v1"
     private let autoBackupDirKey = "daynote.auto-backup-dir"
     private let calendar = Calendar.autoupdatingCurrent
     private let defaults: UserDefaults
@@ -35,6 +41,9 @@ final class TaskStore: ObservableObject {
         loadCalendarTags()
         loadDailyGoals()
         loadCountdowns()
+        loadDailyNotes()
+        loadTaskTemplates()
+        loadPomodoroCounts()
         prepareForCurrentDay(at: Date())
     }
 
@@ -50,6 +59,18 @@ final class TaskStore: ObservableObject {
 
     func tags(on date: Date) -> [CalendarTag] {
         calendarTags[Self.dayKey(for: date)] ?? []
+    }
+
+    func note(on date: Date) -> String {
+        dailyNotes[Self.dayKey(for: date)] ?? ""
+    }
+
+    func hasNote(on date: Date) -> Bool {
+        !note(on: date).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func pomodoroCount(on date: Date) -> Int {
+        pomodoroCounts[Self.dayKey(for: date)] ?? 0
     }
 
     func goalMinutes(on date: Date) -> Int {
@@ -79,6 +100,70 @@ final class TaskStore: ObservableObject {
     func currentSegmentElapsed(at now: Date = Date()) -> TimeInterval {
         guard let timerStartedAt else { return 0 }
         return max(0, now.timeIntervalSince(timerStartedAt))
+    }
+
+    // MARK: - Daily Notes & Pomodoros
+
+    func setNote(_ text: String, on date: Date) {
+        let key = Self.dayKey(for: date)
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            dailyNotes.removeValue(forKey: key)
+        } else {
+            dailyNotes[key] = text
+        }
+        saveDailyNotes()
+    }
+
+    func incrementPomodoro(on date: Date = Date()) {
+        let key = Self.dayKey(for: date)
+        pomodoroCounts[key, default: 0] += 1
+        savePomodoroCounts()
+    }
+
+    // MARK: - Task Templates
+
+    func saveDayAsTemplate(name: String, from date: Date) {
+        let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+        let items = tasks(on: date).map { TaskTemplateItem(title: $0.title, isRecurring: $0.isRecurring) }
+        guard !items.isEmpty else { return }
+        if let idx = taskTemplates.firstIndex(where: { $0.name == cleaned }) {
+            taskTemplates[idx].items = items
+        } else {
+            taskTemplates.append(TaskTemplate(name: cleaned, items: items))
+        }
+        saveTaskTemplates()
+    }
+
+    func addTemplate(name: String, items: [TaskTemplateItem]) {
+        let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, !items.isEmpty else { return }
+        taskTemplates.append(TaskTemplate(name: cleaned, items: items))
+        saveTaskTemplates()
+    }
+
+    func deleteTemplate(id: UUID) {
+        taskTemplates.removeAll { $0.id == id }
+        saveTaskTemplates()
+    }
+
+    func applyTemplate(_ template: TaskTemplate, to date: Date, replaceExisting: Bool = false, at now: Date = Date()) {
+        prepareForCurrentDay(at: now)
+        let key = Self.dayKey(for: date)
+        if replaceExisting {
+            if activeDayKey == key {
+                stopActiveTimer(at: now)
+            }
+            days[key] = template.items.map { DailyTask(title: $0.title, isRecurring: $0.isRecurring) }
+        } else {
+            var current = days[key] ?? []
+            let existingTitles = Set(current.map(\.title))
+            for item in template.items where !existingTitles.contains(item.title) {
+                current.append(DailyTask(title: item.title, isRecurring: item.isRecurring))
+            }
+            days[key] = current
+        }
+        save()
     }
 
     // MARK: - Goals & Tags
@@ -365,6 +450,46 @@ final class TaskStore: ObservableObject {
         save()
     }
 
+    // MARK: - History Search
+
+    func searchHistory(query: String, at now: Date = Date()) -> [HistorySearchMatch] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return [] }
+
+        let allKeys = Set(days.keys).union(calendarTags.keys).union(dailyNotes.keys)
+        var results: [HistorySearchMatch] = []
+
+        for key in allKeys {
+            guard let date = Self.date(fromDayKey: key) else { continue }
+            var snippets: [String] = []
+
+            if let dayTasks = days[key] {
+                for task in dayTasks where task.title.lowercased().contains(needle) {
+                    snippets.append("任务：\(task.title)")
+                }
+            }
+            if let tags = calendarTags[key] {
+                for tag in tags where tag.title.lowercased().contains(needle) {
+                    snippets.append("标签：#\(tag.title)")
+                }
+            }
+            if let note = dailyNotes[key], note.lowercased().contains(needle) {
+                let firstLine = note.split(separator: "\n").first.map(String.init) ?? note
+                snippets.append("随记：\(firstLine)")
+            }
+
+            if !snippets.isEmpty {
+                results.append(HistorySearchMatch(
+                    dayKey: key,
+                    date: date,
+                    snippets: Array(snippets.prefix(3)),
+                    elapsedSeconds: totalElapsed(on: date, at: now)
+                ))
+            }
+        }
+        return results.sorted { $0.dayKey > $1.dayKey }
+    }
+
     // MARK: - Analytics & Stats
 
     func elapsed(for task: DailyTask, on date: Date, at now: Date) -> TimeInterval {
@@ -419,6 +544,30 @@ final class TaskStore: ObservableObject {
                 elapsedSeconds: totalElapsed(on: date, at: now)
             )
         }
+    }
+
+    /// Returns `weeks` columns of 7 days (Mon..Sun) ending in the week containing `endDate`.
+    func heatmapStats(weeks: Int = 12, endingAt endDate: Date = Date(), at now: Date = Date()) -> [[DayStats]] {
+        var mondayCal = calendar
+        mondayCal.firstWeekday = 2
+        guard let currentWeekStart = mondayCal.dateInterval(of: .weekOfYear, for: endDate)?.start else { return [] }
+        var columns: [[DayStats]] = []
+        for weekOffset in stride(from: -(weeks - 1), through: 0, by: 1) {
+            guard let weekStart = mondayCal.date(byAdding: .weekOfYear, value: weekOffset, to: currentWeekStart) else { continue }
+            var col: [DayStats] = []
+            for dayOffset in 0..<7 {
+                guard let date = mondayCal.date(byAdding: .day, value: dayOffset, to: weekStart) else { continue }
+                let dayTasks = tasks(on: date)
+                col.append(DayStats(
+                    date: date,
+                    taskCount: dayTasks.count,
+                    completedCount: dayTasks.lazy.filter(\.isCompleted).count,
+                    elapsedSeconds: totalElapsed(on: date, at: now)
+                ))
+            }
+            columns.append(col)
+        }
+        return columns
     }
 
     func taskTimeTotals(inMonthContaining month: Date, at now: Date = Date()) -> [(title: String, seconds: TimeInterval)] {
@@ -493,12 +642,15 @@ final class TaskStore: ObservableObject {
             timerStartedAt: timerStartedAt
         )
         return DayNoteBackup(
-            formatVersion: 3,
+            formatVersion: 4,
             exportedAt: now,
             archive: archive,
             calendarTags: calendarTags,
             dailyGoals: dailyGoals,
-            countdowns: countdowns
+            countdowns: countdowns,
+            dailyNotes: dailyNotes,
+            taskTemplates: taskTemplates,
+            pomodoroCounts: pomodoroCounts
         )
     }
 
@@ -526,17 +678,23 @@ final class TaskStore: ObservableObject {
         calendarTags = backup.calendarTags
         dailyGoals = backup.dailyGoals
         countdowns = backup.countdowns
+        dailyNotes = backup.dailyNotes
+        taskTemplates = backup.taskTemplates
+        pomodoroCounts = backup.pomodoroCounts
         sortCountdowns()
         validateActiveTimer()
         save()
         saveCalendarTags()
         saveDailyGoals()
         saveCountdowns()
+        saveDailyNotes()
+        saveTaskTemplates()
+        savePomodoroCounts()
     }
 
     func exportCSVString(at now: Date = Date()) -> String {
-        var lines: [String] = ["\u{FEFF}日期,当天目标(分钟),当天总时长(分钟),达成率(%),任务名称,已完成,任务时长(分钟),每日重复,标签"]
-        let allKeys = Set(days.keys).union(calendarTags.keys).sorted()
+        var lines: [String] = ["\u{FEFF}日期,当天目标(分钟),当天总时长(分钟),达成率(%),任务名称,已完成,任务时长(分钟),每日重复,标签,当日随记"]
+        let allKeys = Set(days.keys).union(calendarTags.keys).union(dailyNotes.keys).sorted()
         for key in allKeys {
             guard let date = Self.date(fromDayKey: key) else { continue }
             let dayTasks = days[key] ?? []
@@ -545,14 +703,15 @@ final class TaskStore: ObservableObject {
             let totalMin = String(format: "%.1f", totalSec / 60.0)
             let pct = StudyGoal.percent(elapsedSeconds: totalSec, goalMinutes: goalMin)
             let tagText = (calendarTags[key] ?? []).map(\.title).joined(separator: " / ")
+            let noteText = (dailyNotes[key] ?? "").replacingOccurrences(of: "\n", with: " ")
             if dayTasks.isEmpty {
-                lines.append("\(key),\(goalMin),\(totalMin),\(pct)%,\"\",否,0.0,否,\"\(csvEscape(tagText))\"")
+                lines.append("\(key),\(goalMin),\(totalMin),\(pct)%,\"\",否,0.0,否,\"\(csvEscape(tagText))\",\"\(csvEscape(noteText))\"")
             } else {
                 for task in dayTasks {
                     let taskMin = String(format: "%.1f", elapsed(for: task, on: date, at: now) / 60.0)
                     let done = task.isCompleted ? "是" : "否"
                     let rec = task.isRecurring ? "是" : "否"
-                    lines.append("\(key),\(goalMin),\(totalMin),\(pct)%,\"\(csvEscape(task.title))\",\(done),\(taskMin),\(rec),\"\(csvEscape(tagText))\"")
+                    lines.append("\(key),\(goalMin),\(totalMin),\(pct)%,\"\(csvEscape(task.title))\",\(done),\(taskMin),\(rec),\"\(csvEscape(tagText))\",\"\(csvEscape(noteText))\"")
                 }
             }
         }
@@ -563,7 +722,7 @@ final class TaskStore: ObservableObject {
         let dirPath = autoBackupDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !dirPath.isEmpty else { return }
         let now = Date()
-        if !force, let last = lastAutoBackupAt, now.timeIntervalSince(last) < 10 {
+        if !force, let last = lastAutoBackupAt, now.timeIntervalSince(last) < 15 {
             return
         }
         var isDir: ObjCBool = false
@@ -688,6 +847,30 @@ final class TaskStore: ObservableObject {
         sortCountdowns()
     }
 
+    private func loadDailyNotes() {
+        guard
+            let data = defaults.data(forKey: dailyNotesKey),
+            let notes = try? JSONDecoder().decode([String: String].self, from: data)
+        else { return }
+        dailyNotes = notes
+    }
+
+    private func loadTaskTemplates() {
+        guard
+            let data = defaults.data(forKey: taskTemplatesKey),
+            let templates = try? JSONDecoder().decode([TaskTemplate].self, from: data)
+        else { return }
+        taskTemplates = templates
+    }
+
+    private func loadPomodoroCounts() {
+        guard
+            let data = defaults.data(forKey: pomodoroCountsKey),
+            let counts = try? JSONDecoder().decode([String: Int].self, from: data)
+        else { return }
+        pomodoroCounts = counts
+    }
+
     private func saveDailyGoals() {
         guard let data = try? JSONEncoder().encode(dailyGoals) else { return }
         defaults.set(data, forKey: dailyGoalsKey)
@@ -703,6 +886,24 @@ final class TaskStore: ObservableObject {
     private func saveCountdowns() {
         guard let data = try? JSONEncoder().encode(countdowns) else { return }
         defaults.set(data, forKey: countdownsKey)
+        performAutoBackupIfConfigured()
+    }
+
+    private func saveDailyNotes() {
+        guard let data = try? JSONEncoder().encode(dailyNotes) else { return }
+        defaults.set(data, forKey: dailyNotesKey)
+        performAutoBackupIfConfigured()
+    }
+
+    private func saveTaskTemplates() {
+        guard let data = try? JSONEncoder().encode(taskTemplates) else { return }
+        defaults.set(data, forKey: taskTemplatesKey)
+        performAutoBackupIfConfigured()
+    }
+
+    private func savePomodoroCounts() {
+        guard let data = try? JSONEncoder().encode(pomodoroCounts) else { return }
+        defaults.set(data, forKey: pomodoroCountsKey)
         performAutoBackupIfConfigured()
     }
 

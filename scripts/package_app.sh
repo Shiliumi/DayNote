@@ -16,6 +16,7 @@ fi
 
 mkdir -p "$macos_dir" "$resources_dir"
 install -m 755 "$project_dir/.build/release/DayNote" "$macos_dir/DayNote"
+strip -x "$macos_dir/DayNote" 2>/dev/null || true
 install -m 644 "$project_dir/Resources/Info.plist" "$app_bundle/Contents/Info.plist"
 if [[ -f "$project_dir/Resources/AppIcon.icns" ]]; then
     install -m 644 "$project_dir/Resources/AppIcon.icns" "$resources_dir/AppIcon.icns"

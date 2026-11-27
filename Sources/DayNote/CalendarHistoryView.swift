@@ -8,6 +8,7 @@ struct CalendarHistoryView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var visibleMonth: Date
     @State private var calendarSelection: Date
+    @State private var searchQuery = ""
     @State private var showingTagEditor = false
     @State private var showingDayGoalEditor = false
     @State private var showingCountdownPopover = false
@@ -27,40 +28,69 @@ struct CalendarHistoryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 14) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("中国日历与历史")
-                        .font(.system(size: 24, weight: .bold, design: .rounded))
-                    Text("农历 · 2024–2027 法定节假日 · 未来规划 · 标签与倒计时")
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                    Text("农历 · 2024–2027 节假日 · 随记搜索 · 倒计时")
+                        .font(.system(size: 11.5, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
+
                 Spacer()
+
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    TextField("搜索任务、随记或标签…", text: $searchQuery)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12, design: .rounded))
+                    if !searchQuery.isEmpty {
+                        Button { searchQuery = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .frame(width: 210)
+                .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.secondary.opacity(0.10)))
+
                 Button("完成") { dismiss() }
                     .keyboardShortcut(.cancelAction)
             }
-            .padding(24)
+            .padding(.horizontal, 22)
+            .padding(.vertical, 18)
 
             Divider()
 
             HStack(spacing: 0) {
-                VStack(spacing: 12) {
-                    monthHeader
-                    weekdayHeader
-                    calendarGrid
-                    calendarLegend
-                    Spacer(minLength: 0)
+                if !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    searchResultsPane
+                        .frame(width: 500)
+                } else {
+                    VStack(spacing: 12) {
+                        monthHeader
+                        weekdayHeader
+                        calendarGrid
+                        calendarLegend
+                        Spacer(minLength: 0)
+                    }
+                    .padding(20)
+                    .frame(width: 500)
                 }
-                .padding(20)
-                .frame(width: 500)
 
                 Divider()
 
                 selectedDayPreview
-                    .frame(width: 300)
+                    .frame(width: 320)
             }
         }
-        .frame(width: 800, height: 610)
+        .frame(width: 820, height: 630)
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $showingTagEditor) {
             CalendarTagEditorView(
@@ -71,6 +101,67 @@ struct CalendarHistoryView: View {
                 store.setTags(tags, on: calendarSelection)
             }
         }
+    }
+
+    private var searchResultsPane: some View {
+        let matches = store.searchHistory(query: searchQuery)
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("找到 \(matches.count) 条匹配日期")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+
+            if matches.isEmpty {
+                VStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 28, weight: .light))
+                        .foregroundStyle(.tertiary)
+                    Text("没有找到包含“\(searchQuery)”的历史记录")
+                        .font(.system(size: 13, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 8) {
+                        ForEach(matches) { match in
+                            Button {
+                                calendarSelection = match.date
+                                visibleMonth = calendar.dateInterval(of: .month, for: match.date)?.start ?? match.date
+                                searchQuery = ""
+                            } label: {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    HStack {
+                                        Text(match.dayKey)
+                                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                                            .foregroundStyle(accent)
+                                        Text(match.date.formatted(.dateTime.weekday(.abbreviated)))
+                                            .font(.system(size: 11, design: .rounded))
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                        if match.elapsedSeconds > 0 {
+                                            Text(ContentView.formatDuration(match.elapsedSeconds))
+                                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    ForEach(match.snippets, id: \.self) { snippet in
+                                        Text(snippet)
+                                            .font(.system(size: 12, design: .rounded))
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                                .padding(11)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.secondary.opacity(0.07)))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(20)
     }
 
     private var monthHeader: some View {
@@ -137,6 +228,7 @@ struct CalendarHistoryView: View {
         let isFuture = calendar.startOfDay(for: date) > calendar.startOfDay(for: Date())
         let taskCount = store.tasks(on: date).count
         let hasActivity = store.hasActivity(on: date)
+        let hasNote = store.hasNote(on: date)
         let achievement = StudyGoal.percent(elapsedSeconds: store.totalElapsed(on: date), goalMinutes: store.goalMinutes(on: date))
         let holiday = ChinaCalendar.officialHoliday(for: date)
         let festival = ChinaCalendar.traditionalFestival(for: date)
@@ -156,6 +248,10 @@ struct CalendarHistoryView: View {
                         Image(systemName: "flag.fill")
                             .font(.system(size: 7))
                             .foregroundStyle(isSelected ? .white : accent)
+                    } else if hasNote {
+                        Image(systemName: "doc.text.fill")
+                            .font(.system(size: 7))
+                            .foregroundStyle(isSelected ? .white.opacity(0.85) : Color.secondary)
                     }
                     Spacer(minLength: 0)
                     if let holiday {
@@ -207,12 +303,10 @@ struct CalendarHistoryView: View {
                 calendarSelection = date
                 showingTagEditor = true
             }
-            if !isFuture || isFuture {
-                Button("设为首页倒计时") {
-                    calendarSelection = date
-                    countdownTitleDraft = store.tags(on: date).first?.title ?? ""
-                    showingCountdownPopover = true
-                }
+            Button("设为首页倒计时") {
+                calendarSelection = date
+                countdownTitleDraft = store.tags(on: date).first?.title ?? ""
+                showingCountdownPopover = true
             }
         }
     }
@@ -228,6 +322,10 @@ struct CalendarHistoryView: View {
             HStack(spacing: 4) {
                 Circle().fill(accent).frame(width: 6, height: 6)
                 Text("学习记录")
+            }
+            HStack(spacing: 4) {
+                Image(systemName: "doc.text.fill").font(.system(size: 7))
+                Text("随记")
             }
             HStack(spacing: 4) {
                 Image(systemName: "flag.fill").font(.system(size: 7)).foregroundStyle(accent)
@@ -251,8 +349,12 @@ struct CalendarHistoryView: View {
         let isFuture = calendar.startOfDay(for: calendarSelection) > calendar.startOfDay(for: Date())
         let dayKey = TaskStore.dayKey(for: calendarSelection)
         let dayCountdowns = store.countdowns.filter { $0.targetDayKey == dayKey }
+        let noteBinding = Binding<String>(
+            get: { store.note(on: calendarSelection) },
+            set: { store.setNote($0, on: calendarSelection) }
+        )
 
-        return VStack(alignment: .leading, spacing: 12) {
+        return VStack(alignment: .leading, spacing: 11) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(calendarSelection.formatted(.dateTime.month(.wide).day()))
@@ -311,37 +413,35 @@ struct CalendarHistoryView: View {
             .foregroundStyle(.secondary)
 
             if calendar.startOfDay(for: calendarSelection) >= calendar.startOfDay(for: Date()) {
-                HStack(spacing: 6) {
-                    Button {
-                        countdownTitleDraft = tags.first?.title ?? ""
-                        showingCountdownPopover = true
-                    } label: {
-                        Label(dayCountdowns.isEmpty ? "设为首页倒计时" : "添加倒计时", systemImage: "flag.badge.ellipsis")
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .popover(isPresented: $showingCountdownPopover, arrowEdge: .trailing) {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("添加首页倒计时")
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
-                            TextField("例如：考研初试", text: $countdownTitleDraft)
-                                .textFieldStyle(.roundedBorder)
-                            HStack {
-                                Button("取消") { showingCountdownPopover = false }
-                                Spacer()
-                                Button("添加") {
-                                    store.addCountdown(title: countdownTitleDraft, targetDate: calendarSelection)
-                                    showingCountdownPopover = false
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(accent)
-                                .disabled(countdownTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button {
+                    countdownTitleDraft = tags.first?.title ?? ""
+                    showingCountdownPopover = true
+                } label: {
+                    Label(dayCountdowns.isEmpty ? "设为首页倒计时" : "添加倒计时", systemImage: "flag.badge.ellipsis")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .popover(isPresented: $showingCountdownPopover, arrowEdge: .trailing) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("添加首页倒计时")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                        TextField("例如：考研初试", text: $countdownTitleDraft)
+                            .textFieldStyle(.roundedBorder)
+                        HStack {
+                            Button("取消") { showingCountdownPopover = false }
+                            Spacer()
+                            Button("添加") {
+                                store.addCountdown(title: countdownTitleDraft, targetDate: calendarSelection)
+                                showingCountdownPopover = false
                             }
+                            .buttonStyle(.borderedProminent)
+                            .tint(accent)
+                            .disabled(countdownTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
-                        .padding(14)
-                        .frame(width: 240)
                     }
+                    .padding(14)
+                    .frame(width: 240)
                 }
             }
 
@@ -353,7 +453,7 @@ struct CalendarHistoryView: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("标签")
                         .font(.system(size: 12, weight: .bold, design: .rounded))
@@ -378,6 +478,16 @@ struct CalendarHistoryView: View {
                         }
                     }
                 }
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("当日随记")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                TextEditor(text: noteBinding)
+                    .font(.system(size: 11.5, design: .rounded))
+                    .frame(height: 58)
+                    .padding(4)
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.secondary.opacity(0.08)))
             }
 
             Divider()
@@ -421,7 +531,7 @@ struct CalendarHistoryView: View {
             .buttonStyle(.borderedProminent)
             .tint(accent)
         }
-        .padding(20)
+        .padding(18)
     }
 
     private func badge(_ title: String, color: Color) -> some View {

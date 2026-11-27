@@ -4,6 +4,7 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var store: TaskStore
     @ObservedObject var controller: AppController
+    @ObservedObject var clock: LiveClock
     @AppStorage("daynote.pin-window") private var isPinned = true
     @AppStorage("daynote.desktop-mode") private var isDesktopMode = false
     @State private var selectedDate = Date()
@@ -15,43 +16,45 @@ struct ContentView: View {
     @State private var showingStatistics = false
     @State private var showingSettings = false
     @State private var showingGoalEditor = false
+    @State private var showingDailyNote = false
+    @State private var showingSaveTemplateAlert = false
+    @State private var templateNameDraft = ""
     @State private var editingRequest: TaskEditRequest?
-    @State private var draggingTaskID: UUID?
     @FocusState private var isAddingTask: Bool
 
-    private let accent = Color(red: 0.96, green: 0.43, blue: 0.27)
     private let calendar = Calendar.autoupdatingCurrent
+    private var palette: DayNotePalette { controller.palette }
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            Group {
-                if controller.isMiniMode {
-                    miniCapsule(at: context.date)
-                } else {
-                    panel(at: context.date)
-                }
-            }
-            .onChange(of: TaskStore.dayKey(for: context.date)) {
-                handleDayChange(at: context.date)
-            }
-            .onChange(of: Int(context.date.timeIntervalSince1970)) {
-                controller.evaluateFocusReminder(at: context.date)
+        let now = clock.now
+
+        Group {
+            if controller.isMiniMode {
+                miniCapsule(at: now)
+            } else {
+                panel(at: now)
             }
         }
+        .preferredColorScheme(palette.colorScheme)
+        .onChange(of: TaskStore.dayKey(for: now)) {
+            handleDayChange(at: now)
+        }
         .frame(
-            minWidth: controller.isMiniMode ? 280 : 340,
-            idealWidth: controller.isMiniMode ? 330 : 370,
-            maxWidth: controller.isMiniMode ? 420 : .infinity,
-            minHeight: controller.isMiniMode ? 54 : 460,
-            idealHeight: controller.isMiniMode ? 58 : 560,
-            maxHeight: controller.isMiniMode ? 68 : .infinity
+            minWidth: controller.isMiniMode ? 290 : 356,
+            idealWidth: controller.isMiniMode ? 344 : 384,
+            maxWidth: controller.isMiniMode ? 440 : .infinity,
+            minHeight: controller.isMiniMode ? 56 : 500,
+            idealHeight: controller.isMiniMode ? 62 : 610,
+            maxHeight: controller.isMiniMode ? 72 : .infinity
         )
         .background(
             WindowConfigurator(
                 controller: controller,
                 isPinned: isPinned,
                 isDesktopMode: isDesktopMode,
-                isMiniMode: controller.isMiniMode
+                isMiniMode: controller.isMiniMode,
+                windowOpacity: controller.windowOpacity,
+                isDarkTheme: palette.isDark
             )
             .frame(width: 0, height: 0)
         )
@@ -62,6 +65,16 @@ struct ContentView: View {
             }
         } message: {
             Text("所有勾选状态和计时都会清零，任务名称会保留。")
+        }
+        .alert("保存为任务模板", isPresented: $showingSaveTemplateAlert) {
+            TextField("例如：工作日冲刺", text: $templateNameDraft)
+            Button("取消", role: .cancel) { templateNameDraft = "" }
+            Button("保存") {
+                store.saveDayAsTemplate(name: templateNameDraft, from: selectedDate)
+                templateNameDraft = ""
+            }
+        } message: {
+            Text("将当前列表中的任务保存为快捷模板，随时可一键应用到任意日期。")
         }
         .alert(item: $controller.sleepPrompt) { prompt in
             Alert(
@@ -76,16 +89,16 @@ struct ContentView: View {
             )
         }
         .sheet(isPresented: $showingCalendar) {
-            CalendarHistoryView(store: store, selectedDate: $selectedDate, accent: accent)
+            CalendarHistoryView(store: store, selectedDate: $selectedDate, accent: palette.accent)
         }
         .sheet(isPresented: $showingStatistics) {
-            MonthlyStatisticsView(store: store, initialMonth: selectedDate, accent: accent)
+            MonthlyStatisticsView(store: store, initialMonth: selectedDate, accent: palette.accent)
         }
         .sheet(isPresented: $showingSettings) {
-            SettingsView(store: store, controller: controller, accent: accent)
+            SettingsView(store: store, controller: controller, accent: palette.accent)
         }
         .sheet(item: $editingRequest) { request in
-            TaskEditView(request: request, accent: accent) { title, completed, seconds, isRecurring in
+            TaskEditView(request: request, accent: palette.accent) { title, completed, seconds, isRecurring in
                 store.updateTask(
                     id: request.task.id,
                     on: request.date,
@@ -102,43 +115,56 @@ struct ContentView: View {
 
     private func miniCapsule(at now: Date) -> some View {
         let active = store.activeTask
-        let elapsed = active != nil ? store.activeElapsed(at: now) : store.totalElapsed(on: now, at: now)
+        let totalElapsed = store.totalElapsed(on: now, at: now)
         let goalMin = store.goalMinutes(on: now)
-        let percent = StudyGoal.percent(elapsedSeconds: store.totalElapsed(on: now, at: now), goalMinutes: goalMin)
+        let progress = StudyGoal.rate(elapsedSeconds: totalElapsed, goalMinutes: goalMin)
+        let percent = StudyGoal.percent(elapsedSeconds: totalElapsed, goalMinutes: goalMin)
+        let pomodoroRem = controller.pomodoroRemainingSeconds(at: now)
+        let displayTime = pomodoroRem ?? (active != nil ? store.activeElapsed(at: now) : totalElapsed)
 
         return HStack(spacing: 10) {
-            Circle()
-                .fill(active != nil ? accent : Color.secondary.opacity(0.4))
-                .frame(width: 8, height: 8)
+            ZStack {
+                Circle()
+                    .stroke(palette.accent.opacity(0.20), lineWidth: 3)
+                Circle()
+                    .trim(from: 0, to: pomodoroRem != nil ? controller.pomodoroProgress(at: now) : progress)
+                    .stroke(palette.accent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                if active != nil {
+                    Circle().fill(palette.accent).frame(width: 6, height: 6)
+                }
+            }
+            .frame(width: 22, height: 22)
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(active?.title ?? "今日便笺 · 达成 \(percent)%")
                     .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color(red: 0.22, green: 0.18, blue: 0.14))
+                    .foregroundStyle(palette.inkPrimary)
                     .lineLimit(1)
                 if active != nil {
-                    Text("今日总计 \(Self.formatDuration(store.totalElapsed(on: now, at: now))) · \(percent)%")
-                        .font(.system(size: 9, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
+                    Text(pomodoroRem != nil ? "🍅 番茄倒计时 · 今日 \(percent)%" : "今日总计 \(Self.formatDuration(totalElapsed)) · \(percent)%")
+                        .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                        .foregroundStyle(palette.inkSecondary)
                         .monospacedDigit()
                 }
             }
 
             Spacer(minLength: 4)
 
-            Text(Self.formatDuration(elapsed))
-                .font(.system(size: 13, weight: .bold, design: .monospaced))
-                .foregroundStyle(active != nil ? accent : Color.secondary)
+            Text(Self.formatDuration(displayTime))
+                .font(.system(size: 13.5, weight: .bold, design: .monospaced))
+                .foregroundStyle(active != nil ? palette.accent : palette.inkSecondary)
                 .monospacedDigit()
 
             Button {
                 store.toggleQuickTimer(at: now)
+                controller.updateStatusBarTitle()
             } label: {
                 Image(systemName: active != nil ? "pause.fill" : "play.fill")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(active != nil ? .white : accent)
+                    .foregroundStyle(active != nil ? .white : palette.accent)
                     .frame(width: 26, height: 26)
-                    .background(Circle().fill(active != nil ? accent : accent.opacity(0.14)))
+                    .background(Circle().fill(active != nil ? palette.accent : palette.accentSoft))
             }
             .buttonStyle(.plain)
             .help(active != nil ? "暂停计时 (⌥⇧Space)" : "开始计时 (⌥⇧Space)")
@@ -148,294 +174,584 @@ struct ContentView: View {
             } label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(palette.inkSecondary)
                     .frame(width: 24, height: 24)
-                    .background(Circle().fill(Color.white.opacity(0.55)))
+                    .background(Circle().fill(palette.surfaceCard))
             }
             .buttonStyle(.plain)
             .help("展开完整便笺")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
-        .background(
-            LinearGradient(
-                colors: [
-                    Color(red: 1.0, green: 0.98, blue: 0.91),
-                    Color(red: 1.0, green: 0.95, blue: 0.88)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
+        .background(palette.backgroundGradient)
         .clipShape(Capsule())
         .overlay(
             Capsule()
-                .stroke(active != nil ? accent.opacity(0.4) : Color.white.opacity(0.8), lineWidth: 1)
+                .stroke(active != nil ? palette.accent.opacity(0.45) : palette.borderSubtle, lineWidth: 1)
         )
+        .shadow(color: Color.black.opacity(palette.isDark ? 0.35 : 0.10), radius: 8, y: 3)
         .padding(4)
     }
 
-    // MARK: - Main Sticky Note Panel
+    // MARK: - Main Sticky Note Panel (Redesigned 2-Tier Layout)
 
     private func panel(at now: Date) -> some View {
         let dayTasks = store.tasks(on: selectedDate)
 
         return VStack(spacing: 0) {
-            header(at: now)
+            windowChromeBar
 
-            dailyGoalBar
-
-            if let nearest = store.upcomingCountdowns(from: now).first {
-                countdownBanner(event: nearest.event, daysRemaining: nearest.daysRemaining)
-            }
+            heroCard(dayTasks, at: now)
+                .padding(.horizontal, 14)
+                .padding(.top, 2)
+                .padding(.bottom, 10)
 
             if let reminder = controller.focusReminderMessage {
                 focusReminderBanner(reminder)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 8)
             }
 
             if !calendar.isDate(selectedDate, inSameDayAs: now) {
                 historyBanner(at: now)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 8)
             }
 
-            Divider().overlay(Color.black.opacity(0.06))
+            if showingDailyNote {
+                dailyNoteDrawer
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 10)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
 
             taskList(dayTasks, at: now)
 
-            Divider().overlay(Color.black.opacity(0.06))
-
             addTaskBar
-            summary(dayTasks, at: now)
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+                .padding(.bottom, 14)
         }
-        .background(
-            LinearGradient(
-                colors: [
-                    Color(red: 1.0, green: 0.98, blue: 0.91),
-                    Color(red: 1.0, green: 0.95, blue: 0.88)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(palette.backgroundGradient)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.white.opacity(0.75), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(palette.isDark ? Color.white.opacity(0.12) : Color.white.opacity(0.85), lineWidth: 1)
         )
-        .padding(8)
+        .padding(6)
     }
 
-    private func header(at now: Date) -> some View {
-        let isToday = calendar.isDate(selectedDate, inSameDayAs: now)
-        let isFuture = selectedDate > calendar.startOfDay(for: now) && !isToday
+    // MARK: - Tier 1: Dedicated Window Chrome Bar (Zero Traffic-Light Overlap!)
 
-        return HStack(alignment: .top, spacing: 5) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(isToday ? "今日便笺" : (isFuture ? "计划便笺" : "历史便笺"))
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color(red: 0.22, green: 0.18, blue: 0.14))
+    private var windowChromeBar: some View {
+        HStack(spacing: 5) {
+            // Left 68pt intentionally clear for native macOS traffic lights
+            Spacer(minLength: 74)
 
-                Text(selectedDate.formatted(.dateTime.year().month(.wide).day().weekday(.wide)))
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 4)
-
-            headerButton("calendar", help: "日历与历史") {
-                showingCalendar = true
-            }
-
-            headerButton("chart.bar.xaxis", help: "周/月统计") {
-                showingStatistics = true
-            }
-
-            headerButton("rectangle.compress.vertical", help: "迷你悬浮条") {
-                controller.isMiniMode = true
-            }
-
-            headerButton(isDesktopMode ? "desktopcomputer.and.macbook" : "desktopcomputer", isActive: isDesktopMode, help: isDesktopMode ? "退出桌面模式" : "固定在系统桌面") {
+            chromeIconButton(
+                isDesktopMode ? "desktopcomputer.and.macbook" : "desktopcomputer",
+                isActive: isDesktopMode,
+                help: isDesktopMode ? "退出桌面模式" : "固定在系统桌面"
+            ) {
                 isDesktopMode.toggle()
             }
 
-            headerButton(isPinned ? "pin.fill" : "pin", isActive: isPinned && !isDesktopMode, help: isPinned ? "取消置顶" : "保持置顶") {
+            chromeIconButton(
+                isPinned ? "pin.fill" : "pin",
+                isActive: isPinned && !isDesktopMode,
+                help: isPinned ? "取消置顶" : "保持置顶"
+            ) {
                 if isDesktopMode { isDesktopMode = false }
                 isPinned.toggle()
             }
 
-            headerButton("gearshape", help: "设置、快捷键与数据备份") {
+            chromeIconButton(
+                "rectangle.compress.vertical",
+                isActive: false,
+                help: "收起为迷你悬浮条"
+            ) {
+                controller.isMiniMode = true
+            }
+
+            chromeIconButton(
+                "gearshape",
+                isActive: false,
+                help: "主题、快捷键与数据备份"
+            ) {
                 showingSettings = true
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 18)
-        .padding(.bottom, 14)
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
     }
 
-    private func headerButton(
+    private func chromeIconButton(
         _ systemName: String,
-        isActive: Bool = false,
+        isActive: Bool,
         help: String,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(isActive ? palette.accent : palette.inkSecondary.opacity(0.85))
                 .frame(width: 24, height: 24)
+                .background(
+                    Circle().fill(isActive ? palette.accentSoft : palette.surfaceElevated)
+                )
         }
-        .buttonStyle(HeaderButtonStyle(isActive: isActive, accent: accent))
+        .buttonStyle(.plain)
         .help(help)
     }
 
-    private func countdownBanner(event: CountdownEvent, daysRemaining: Int) -> some View {
-        let color = CalendarTagPalette.color(named: event.colorName)
-        return Button {
-            showingSettings = true
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: "flag.fill")
-                    .font(.system(size: 10))
-                    .foregroundStyle(color)
-                Text(event.title)
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(Color(red: 0.25, green: 0.20, blue: 0.16))
-                    .lineLimit(1)
-                Spacer()
-                Text(daysRemaining == 0 ? "就是今天!" : "还有 \(daysRemaining) 天")
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(color)
-                    .monospacedDigit()
+    // MARK: - Tier 2: Unified Hero Focus Card
+
+    private func heroCard(_ dayTasks: [DailyTask], at now: Date) -> some View {
+        let isToday = calendar.isDate(selectedDate, inSameDayAs: now)
+        let isFuture = selectedDate > calendar.startOfDay(for: now) && !isToday
+        let elapsed = store.totalElapsed(on: selectedDate, at: now)
+        let goalMinutes = store.goalMinutes(on: selectedDate)
+        let progress = StudyGoal.rate(elapsedSeconds: elapsed, goalMinutes: goalMinutes)
+        let percent = StudyGoal.percent(elapsedSeconds: elapsed, goalMinutes: goalMinutes)
+        let completed = dayTasks.lazy.filter(\.isCompleted).count
+        let streak = store.currentStreak(at: now)
+        let pomodoros = store.pomodoroCount(on: selectedDate)
+        let lunarShort = ChinaCalendar.traditionalFestival(for: selectedDate) ?? ChinaCalendar.lunarDetail(for: selectedDate)
+        let pomodoroRem = isToday ? controller.pomodoroRemainingSeconds(at: now) : nil
+
+        return VStack(alignment: .leading, spacing: 11) {
+            // Top Row: Title + Date + Progress Ring
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text(isToday ? "今日便笺" : (isFuture ? "计划便笺" : "历史便笺"))
+                            .font(.system(size: 20, weight: .bold, design: .rounded))
+                            .foregroundStyle(palette.inkPrimary)
+
+                        if streak > 0 && isToday {
+                            HStack(spacing: 2) {
+                                Image(systemName: "flame.fill")
+                                    .font(.system(size: 9))
+                                Text("\(streak)天")
+                                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                            }
+                            .foregroundStyle(palette.accent)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2.5)
+                            .background(Capsule().fill(palette.accentSoft))
+                            .help("已连续打卡 \(streak) 天")
+                        }
+
+                        if pomodoros > 0 {
+                            Text("🍅×\(pomodoros)")
+                                .font(.system(size: 10, weight: .bold, design: .rounded))
+                                .foregroundStyle(palette.inkSecondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2.5)
+                                .background(Capsule().fill(palette.borderSubtle))
+                                .help("当天已完成 \(pomodoros) 个番茄")
+                        }
+                    }
+
+                    Text("\(selectedDate.formatted(.dateTime.month().day().weekday(.abbreviated))) · \(lunarShort)")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(palette.inkSecondary)
+                }
+
+                Spacer(minLength: 4)
+
+                // Circular Progress Ring
+                ZStack {
+                    Circle()
+                        .stroke(palette.accent.opacity(0.16), lineWidth: 5)
+                    Circle()
+                        .trim(from: 0, to: progress)
+                        .stroke(
+                            AngularGradient(
+                                colors: [palette.accent.opacity(0.75), palette.accent],
+                                center: .center
+                            ),
+                            style: StrokeStyle(lineWidth: 5, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                        .animation(.easeOut(duration: 0.35), value: progress)
+
+                    VStack(spacing: -1) {
+                        Text("\(percent)%")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(palette.inkPrimary)
+                            .monospacedDigit()
+                        Text("\(completed)/\(dayTasks.count)")
+                            .font(.system(size: 8.5, weight: .semibold, design: .rounded))
+                            .foregroundStyle(palette.inkSecondary)
+                            .monospacedDigit()
+                    }
+                }
+                .frame(width: 50, height: 50)
+                .help("学习时长达成率 \(percent)% · 任务打卡 \(completed)/\(dayTasks.count)")
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 7)
-            .background(color.opacity(0.08))
+
+            // Middle Row: Big Focus Duration + Compact Goal Pill
+            HStack(alignment: .center, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text(Self.formatDuration(elapsed))
+                        .font(.system(size: 21, weight: .bold, design: .rounded))
+                        .foregroundStyle(store.isTimerRunning && isToday ? palette.accent : palette.inkPrimary)
+                        .monospacedDigit()
+                    Text("专注")
+                        .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                        .foregroundStyle(palette.inkSecondary)
+                }
+
+                Spacer()
+
+                // Compact Goal Stepper Pill
+                HStack(spacing: 4) {
+                    Button {
+                        store.setGoalMinutes(goalMinutes - 30, on: selectedDate)
+                    } label: {
+                        Image(systemName: "minus")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(palette.inkSecondary)
+                            .frame(width: 20, height: 20)
+                            .background(Circle().fill(palette.borderSubtle))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(goalMinutes <= 30)
+                    .help("目标减少半小时")
+
+                    Button {
+                        showingGoalEditor.toggle()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text("目标 \(StudyGoal.compactDurationLabel(minutes: goalMinutes))")
+                                .monospacedDigit()
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 7.5, weight: .bold))
+                        }
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(palette.accent)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(palette.accentSoft))
+                    }
+                    .buttonStyle(.plain)
+                    .popover(isPresented: $showingGoalEditor, arrowEdge: .bottom) {
+                        StudyGoalEditor(
+                            goalMinutes: Binding(
+                                get: { store.goalMinutes(on: selectedDate) },
+                                set: { store.setGoalMinutes($0, on: selectedDate) }
+                            ),
+                            date: selectedDate,
+                            accent: palette.accent
+                        )
+                    }
+                    .help("选择当天学习目标")
+
+                    Button {
+                        store.setGoalMinutes(goalMinutes + 30, on: selectedDate)
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(palette.inkSecondary)
+                            .frame(width: 20, height: 20)
+                            .background(Circle().fill(palette.borderSubtle))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(goalMinutes >= 24 * 60)
+                    .help("目标增加半小时")
+                }
+            }
+
+            // Optional Pomodoro Live Progress Strip
+            if let remaining = pomodoroRem {
+                VStack(spacing: 5) {
+                    HStack {
+                        Label("番茄倒计时（\(controller.pomodoroMinutes)分钟）", systemImage: "flame.fill")
+                            .font(.system(size: 10.5, weight: .bold, design: .rounded))
+                            .foregroundStyle(palette.accent)
+                        Spacer()
+                        Text("剩余 \(Self.formatDuration(remaining))")
+                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .foregroundStyle(palette.accent)
+                    }
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(palette.accent.opacity(0.16))
+                            Capsule()
+                                .fill(palette.accent)
+                                .frame(width: geo.size.width * controller.pomodoroProgress(at: now))
+                        }
+                    }
+                    .frame(height: 4)
+                }
+                .padding(.top, 2)
+            }
+
+            // Optional Countdown Chip
+            if let nearest = store.upcomingCountdowns(from: now).first {
+                let chipColor = CalendarTagPalette.color(named: nearest.event.colorName)
+                Button {
+                    showingSettings = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "flag.fill")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(chipColor)
+                        Text(nearest.event.title)
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .foregroundStyle(palette.inkPrimary)
+                            .lineLimit(1)
+                        Spacer()
+                        Text(nearest.daysRemaining == 0 ? "就是今天!" : "还剩 \(nearest.daysRemaining) 天")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(chipColor)
+                            .monospacedDigit()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(chipColor.opacity(0.10)))
+                }
+                .buttonStyle(.plain)
+                .help("点击管理首页倒计时")
+            }
+
+            // Bottom Row: 4 Crisp Labeled Action Pills
+            HStack(spacing: 6) {
+                actionPill(title: "日历", icon: "calendar", isActive: false) {
+                    showingCalendar = true
+                }
+                actionPill(title: "统计", icon: "chart.bar.xaxis", isActive: false) {
+                    showingStatistics = true
+                }
+                actionPill(
+                    title: "随记",
+                    icon: "square.and.pencil",
+                    isActive: showingDailyNote,
+                    showDot: store.hasNote(on: selectedDate) && !showingDailyNote
+                ) {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showingDailyNote.toggle()
+                    }
+                }
+                pomodoroPill
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(palette.surfaceCard)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(palette.borderSubtle, lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(palette.isDark ? 0.22 : 0.045), radius: 8, y: 3)
+        .contextMenu {
+            Button("清零这一天", role: .destructive) { showingResetAlert = true }
+        }
+    }
+
+    private func actionPill(
+        title: String,
+        icon: String,
+        isActive: Bool,
+        showDot: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 10.5, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                if showDot {
+                    Circle().fill(palette.accent).frame(width: 5, height: 5)
+                }
+            }
+            .foregroundStyle(isActive ? .white : palette.inkPrimary.opacity(0.82))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(isActive ? palette.accent : palette.surfaceElevated)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(isActive ? Color.clear : palette.borderSubtle, lineWidth: 0.8)
+            )
         }
         .buttonStyle(.plain)
-        .help("点击管理首页倒计时")
     }
+
+    private var pomodoroPill: some View {
+        Menu {
+            Button {
+                controller.pomodoroEnabled = false
+            } label: {
+                Label("正向计时（秒表）", systemImage: controller.pomodoroEnabled ? "circle" : "checkmark.circle.fill")
+            }
+            Divider()
+            ForEach([25, 45, 60], id: \.self) { mins in
+                Button {
+                    controller.pomodoroMinutes = mins
+                    controller.pomodoroEnabled = true
+                } label: {
+                    Label(
+                        "番茄倒计时 \(mins) 分钟",
+                        systemImage: (controller.pomodoroEnabled && controller.pomodoroMinutes == mins) ? "checkmark.circle.fill" : "flame"
+                    )
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: controller.pomodoroEnabled ? "flame.fill" : "flame")
+                    .font(.system(size: 10.5, weight: .semibold))
+                Text(controller.pomodoroEnabled ? "\(controller.pomodoroMinutes)分" : "番茄")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+            }
+            .foregroundStyle(controller.pomodoroEnabled ? .white : palette.inkPrimary.opacity(0.82))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(controller.pomodoroEnabled ? palette.accent : palette.surfaceElevated)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(controller.pomodoroEnabled ? Color.clear : palette.borderSubtle, lineWidth: 0.8)
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .help("切换正向秒表或番茄倒计时模式")
+    }
+
+    // MARK: - Daily Note Collapsible Drawer
+
+    private var dailyNoteDrawer: some View {
+        let binding = Binding<String>(
+            get: { store.note(on: selectedDate) },
+            set: { store.setNote($0, on: selectedDate) }
+        )
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(calendar.isDateInToday(selectedDate) ? "今日随记" : "当日随记", systemImage: "note.text")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(palette.accent)
+                Spacer()
+                Text("自动保存")
+                    .font(.system(size: 9.5, design: .rounded))
+                    .foregroundStyle(palette.inkSecondary.opacity(0.75))
+            }
+
+            ZStack(alignment: .topLeading) {
+                if binding.wrappedValue.isEmpty {
+                    Text("记下今天的复盘小结、错题提醒或灵感...")
+                        .font(.system(size: 12, design: .rounded))
+                        .foregroundStyle(palette.inkSecondary.opacity(0.55))
+                        .padding(.top, 5)
+                        .padding(.leading, 4)
+                        .allowsHitTesting(false)
+                }
+                TextEditor(text: binding)
+                    .font(.system(size: 12.5, design: .rounded))
+                    .foregroundStyle(palette.inkPrimary)
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 62, maxHeight: 92)
+            }
+        }
+        .padding(11)
+        .background(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(palette.surfaceCard)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(palette.accent.opacity(0.25), lineWidth: 1)
+        )
+    }
+
+    // MARK: - Banners
 
     private func focusReminderBanner(_ message: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "bell.badge.fill")
-                .foregroundStyle(accent)
+                .foregroundStyle(palette.accent)
             Text(message)
                 .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(palette.inkPrimary)
                 .lineLimit(2)
             Spacer(minLength: 4)
             Button("休息") {
                 controller.pauseForBreak()
             }
             .buttonStyle(.borderedProminent)
-            .tint(accent)
+            .tint(palette.accent)
             .controlSize(.mini)
-            Button("继续") {
+            Button("知道了") {
                 controller.dismissFocusReminder()
             }
             .buttonStyle(.bordered)
             .controlSize(.mini)
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(accent.opacity(0.12))
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(palette.accentSoft)
+        )
     }
 
     private func historyBanner(at now: Date) -> some View {
         let isFuture = selectedDate > calendar.startOfDay(for: now)
         return HStack(spacing: 8) {
             Image(systemName: isFuture ? "calendar.badge.plus" : "clock.arrow.circlepath")
-            Text(isFuture ? "未来日期 · 可提前安排任务与目标" : "历史日期 · 可补打卡或双击/右键编辑")
+                .foregroundStyle(palette.accent)
+            Text(isFuture ? "未来日期 · 可提前安排任务与目标" : "历史日期 · 可补打卡或编辑任务时长")
                 .lineLimit(1)
             Spacer()
             Button("回到今天") {
                 selectedDate = Date()
             }
             .buttonStyle(.plain)
-            .foregroundStyle(accent)
+            .foregroundStyle(palette.accent)
+            .fontWeight(.bold)
         }
         .font(.system(size: 11, weight: .semibold, design: .rounded))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 18)
-        .padding(.vertical, 9)
-        .background(accent.opacity(0.07))
+        .foregroundStyle(palette.inkSecondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(palette.accentSoft)
+        )
     }
 
-    private var dailyGoalBar: some View {
-        let goalMinutes = store.goalMinutes(on: selectedDate)
-
-        return HStack(spacing: 10) {
-            Image(systemName: "target")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(accent)
-
-            Text(calendar.isDateInToday(selectedDate) ? "今日目标" : "当天目标")
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(.secondary)
-
-            Spacer()
-
-            Button {
-                store.setGoalMinutes(goalMinutes - 30, on: selectedDate)
-            } label: {
-                Image(systemName: "minus")
-                    .frame(width: 22, height: 22)
-            }
-            .buttonStyle(.plain)
-            .background(Circle().fill(Color.black.opacity(0.06)))
-            .disabled(goalMinutes <= 30)
-            .help("减少半小时")
-
-            Button {
-                showingGoalEditor.toggle()
-            } label: {
-                HStack(spacing: 5) {
-                    Text(StudyGoal.durationLabel(minutes: goalMinutes))
-                        .monospacedDigit()
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .bold))
-                }
-                .font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundStyle(accent)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(accent.opacity(0.11)))
-            }
-            .buttonStyle(.plain)
-            .popover(isPresented: $showingGoalEditor, arrowEdge: .top) {
-                StudyGoalEditor(
-                    goalMinutes: Binding(
-                        get: { store.goalMinutes(on: selectedDate) },
-                        set: { store.setGoalMinutes($0, on: selectedDate) }
-                    ),
-                    date: selectedDate,
-                    accent: accent
-                )
-            }
-            .help("选择当天学习目标")
-
-            Button {
-                store.setGoalMinutes(goalMinutes + 30, on: selectedDate)
-            } label: {
-                Image(systemName: "plus")
-                    .frame(width: 22, height: 22)
-            }
-            .buttonStyle(.plain)
-            .background(Circle().fill(Color.black.opacity(0.06)))
-            .disabled(goalMinutes >= 24 * 60)
-            .help("增加半小时")
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 9)
-        .background(Color.white.opacity(0.28))
-    }
+    // MARK: - Task List
 
     @ViewBuilder
     private func taskList(_ dayTasks: [DailyTask], at now: Date) -> some View {
         if dayTasks.isEmpty {
-            VStack(spacing: 12) {
-                Image(systemName: "checklist")
-                    .font(.system(size: 32, weight: .light))
-                    .foregroundStyle(accent.opacity(0.75))
-                Text(calendar.isDate(selectedDate, inSameDayAs: now) ? "写下今天想完成的事" : "这一天还没有记录")
-                    .font(.system(size: 14, weight: .medium, design: .rounded))
-                    .foregroundStyle(.secondary)
+            VStack(spacing: 10) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 28, weight: .light))
+                    .foregroundStyle(palette.accent.opacity(0.75))
+                Text(calendar.isDate(selectedDate, inSameDayAs: now) ? "写下今天想专注的事" : "这一天还没有任务记录")
+                    .font(.system(size: 13.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(palette.inkSecondary)
+                if !store.taskTemplates.isEmpty {
+                    Menu("从模板一键导入") {
+                        ForEach(store.taskTemplates) { template in
+                            Button("\(template.name)（\(template.items.count) 项）") {
+                                store.applyTemplate(template, to: selectedDate)
+                            }
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
@@ -449,7 +765,7 @@ struct ContentView: View {
                             elapsed: store.elapsed(for: task, on: selectedDate, at: now),
                             isRunning: store.activeDayKey == TaskStore.dayKey(for: selectedDate) && store.activeTaskID == task.id,
                             canStartTimer: calendar.isDate(selectedDate, inSameDayAs: now),
-                            accent: accent,
+                            palette: palette,
                             onToggleCompletion: {
                                 store.toggleCompletion(for: task.id, on: selectedDate, at: now)
                             },
@@ -477,36 +793,37 @@ struct ContentView: View {
                                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
-                                .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.95)))
-                                .onAppear { draggingTaskID = task.id }
+                                .background(RoundedRectangle(cornerRadius: 8).fill(palette.surfaceCardActive))
                         }
                         .dropDestination(for: String.self) { items, _ in
                             guard let raw = items.first, let dragged = UUID(uuidString: raw) else { return false }
                             withAnimation(.easeInOut(duration: 0.18)) {
                                 store.moveTask(draggedID: dragged, targetID: task.id, on: selectedDate)
                             }
-                            draggingTaskID = nil
                             return true
                         }
                     }
                 }
                 .padding(.horizontal, 14)
-                .padding(.vertical, 12)
+                .padding(.vertical, 4)
             }
             .scrollIndicators(.hidden)
             .frame(maxHeight: .infinity)
         }
     }
 
+    // MARK: - Bottom Floating Add-Task Capsule
+
     private var addTaskBar: some View {
         HStack(spacing: 8) {
             Image(systemName: "plus.circle.fill")
                 .font(.system(size: 18))
-                .foregroundStyle(accent)
+                .foregroundStyle(palette.accent)
 
             TextField(calendar.isDateInToday(selectedDate) ? "添加任务，按回车保存" : "为这一天添加任务", text: $newTaskTitle)
                 .textFieldStyle(.plain)
-                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .font(.system(size: 13.5, weight: .medium, design: .rounded))
+                .foregroundStyle(palette.inkPrimary)
                 .focused($isAddingTask)
                 .onSubmit(addTask)
 
@@ -515,65 +832,67 @@ struct ContentView: View {
             } label: {
                 Text(newTaskIsRecurring ? "每日" : "仅今天")
                     .font(.system(size: 10, weight: .bold, design: .rounded))
-                    .foregroundStyle(newTaskIsRecurring ? accent : Color.blue)
+                    .foregroundStyle(newTaskIsRecurring ? palette.accent : Color.blue)
                     .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill((newTaskIsRecurring ? accent : Color.blue).opacity(0.12)))
+                    .padding(.vertical, 3.5)
+                    .background(Capsule().fill((newTaskIsRecurring ? palette.accent : Color.blue).opacity(0.13)))
             }
             .buttonStyle(.plain)
             .help(newTaskIsRecurring ? "每日固定任务：次日自动沿用（点击切换为仅今天）" : "仅今天临时任务：次日不会自动复制（点击切换为每日固定）")
 
+            Menu {
+                if !store.tasks(on: selectedDate).isEmpty {
+                    Button {
+                        templateNameDraft = ""
+                        showingSaveTemplateAlert = true
+                    } label: {
+                        Label("将当前任务存为模板…", systemImage: "square.and.arrow.down")
+                    }
+                }
+                if !store.taskTemplates.isEmpty {
+                    Divider()
+                    Section("应用模板（追加）") {
+                        ForEach(store.taskTemplates) { template in
+                            Button("\(template.name)（\(template.items.count) 项）") {
+                                store.applyTemplate(template, to: selectedDate, replaceExisting: false)
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Button("清零这一天", role: .destructive) {
+                    showingResetAlert = true
+                }
+            } label: {
+                Image(systemName: "doc.on.clipboard")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(palette.inkSecondary)
+                    .frame(width: 22, height: 22)
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .help("任务模板与当天操作")
+
             if !newTaskTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Button(action: addTask) {
                     Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 18))
-                        .foregroundStyle(accent)
+                        .font(.system(size: 19))
+                        .foregroundStyle(palette.accent)
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(Color.white.opacity(0.38))
-    }
-
-    private func summary(_ dayTasks: [DailyTask], at now: Date) -> some View {
-        let count = dayTasks.count
-        let completed = dayTasks.lazy.filter(\.isCompleted).count
-        let elapsed = store.totalElapsed(on: selectedDate, at: now)
-        let goalMinutes = store.goalMinutes(on: selectedDate)
-        let progress = StudyGoal.rate(elapsedSeconds: elapsed, goalMinutes: goalMinutes)
-        let percent = StudyGoal.percent(elapsedSeconds: elapsed, goalMinutes: goalMinutes)
-
-        return VStack(spacing: 9) {
-            HStack {
-                Label("达成 \(percent)%", systemImage: "chart.bar.fill")
-
-                Spacer()
-                Label("打卡 \(completed)/\(count)", systemImage: "checkmark.circle")
-                Spacer()
-                Label("\(Self.formatDuration(elapsed))/\(StudyGoal.compactDurationLabel(minutes: goalMinutes))", systemImage: "timer")
-            }
-            .font(.system(size: 11, weight: .semibold, design: .rounded))
-            .foregroundStyle(Color(red: 0.33, green: 0.27, blue: 0.21).opacity(0.8))
-
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.black.opacity(0.08))
-                    Capsule()
-                        .fill(accent)
-                        .frame(width: geometry.size.width * progress)
-                }
-            }
-            .frame(height: 6)
-            .animation(.easeOut(duration: 0.25), value: progress)
-        }
-        .padding(.horizontal, 18)
-        .padding(.top, 12)
-        .padding(.bottom, 16)
-        .contextMenu {
-            Button("清零这一天", role: .destructive) { showingResetAlert = true }
-        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(palette.surfaceCard)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(isAddingTask ? palette.accent.opacity(0.55) : palette.borderSubtle, lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(palette.isDark ? 0.2 : 0.04), radius: 6, y: 2)
     }
 
     private func addTask() {
@@ -731,7 +1050,7 @@ private struct TaskRow: View {
     let elapsed: TimeInterval
     let isRunning: Bool
     let canStartTimer: Bool
-    let accent: Color
+    let palette: DayNotePalette
     let onToggleCompletion: () -> Void
     let onToggleTimer: () -> Void
     let onRename: (String) -> Void
@@ -749,15 +1068,16 @@ private struct TaskRow: View {
         HStack(spacing: 10) {
             Button(action: onToggleCompletion) {
                 Image(systemName: task.isCompleted ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(task.isCompleted ? accent : Color.secondary.opacity(0.55))
+                    .font(.system(size: 19, weight: .medium))
+                    .foregroundStyle(task.isCompleted ? palette.accent : palette.inkSecondary.opacity(0.45))
             }
             .buttonStyle(.plain)
 
             if isInlineEditing {
                 TextField("任务名称", text: $draftTitle)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .font(.system(size: 13.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(palette.inkPrimary)
                     .focused($inlineFocused)
                     .onSubmit(commitInlineEdit)
                     .onExitCommand { isInlineEditing = false }
@@ -769,9 +1089,9 @@ private struct TaskRow: View {
             } else {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(task.title)
-                        .font(.system(size: 14, weight: .medium, design: .rounded))
-                        .foregroundStyle(task.isCompleted ? Color.secondary : Color.primary.opacity(0.86))
-                        .strikethrough(task.isCompleted, color: .secondary)
+                        .font(.system(size: 13.5, weight: isRunning ? .semibold : .medium, design: .rounded))
+                        .foregroundStyle(task.isCompleted ? palette.inkSecondary.opacity(0.75) : palette.inkPrimary)
+                        .strikethrough(task.isCompleted, color: palette.inkSecondary.opacity(0.7))
                         .lineLimit(2)
 
                     if !task.isRecurring {
@@ -780,7 +1100,7 @@ private struct TaskRow: View {
                             .foregroundStyle(.blue)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(Capsule().fill(Color.blue.opacity(0.10)))
+                            .background(Capsule().fill(Color.blue.opacity(0.11)))
                     }
                 }
                 .contentShape(Rectangle())
@@ -798,7 +1118,7 @@ private struct TaskRow: View {
                 Button(action: onEdit) {
                     Image(systemName: "pencil")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(palette.inkSecondary)
                         .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.plain)
@@ -806,17 +1126,17 @@ private struct TaskRow: View {
             }
 
             Text(ContentView.formatDuration(elapsed))
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(isRunning ? accent : Color.secondary)
+                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                .foregroundStyle(isRunning ? palette.accent : palette.inkSecondary)
                 .monospacedDigit()
 
             if canStartTimer {
                 Button(action: onToggleTimer) {
                     Image(systemName: isRunning ? "pause.fill" : "play.fill")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(task.isCompleted ? Color.secondary.opacity(0.4) : (isRunning ? .white : accent))
-                        .frame(width: 26, height: 26)
-                        .background(Circle().fill(isRunning ? accent : accent.opacity(task.isCompleted ? 0.06 : 0.12)))
+                        .foregroundStyle(task.isCompleted ? palette.inkSecondary.opacity(0.35) : (isRunning ? .white : palette.accent))
+                        .frame(width: 27, height: 27)
+                        .background(Circle().fill(isRunning ? palette.accent : palette.accent.opacity(task.isCompleted ? 0.06 : 0.13)))
                 }
                 .buttonStyle(.plain)
                 .disabled(task.isCompleted)
@@ -824,23 +1144,38 @@ private struct TaskRow: View {
                 Button(action: onEdit) {
                     Image(systemName: "pencil")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(accent)
-                        .frame(width: 26, height: 26)
-                        .background(Circle().fill(accent.opacity(0.1)))
+                        .foregroundStyle(palette.accent)
+                        .frame(width: 27, height: 27)
+                        .background(Circle().fill(palette.accentSoft))
                 }
                 .buttonStyle(.plain)
                 .help("编辑任务与时长")
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.leading, isRunning ? 14 : 12)
+        .padding(.trailing, 11)
         .padding(.vertical, 10)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.white.opacity(isRunning ? 0.8 : 0.56))
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(isRunning ? palette.surfaceCardActive : palette.surfaceCard)
+                if isRunning {
+                    RoundedRectangle(cornerRadius: 2, style: .continuous)
+                        .fill(palette.accent)
+                        .frame(width: 3.5)
+                        .padding(.vertical, 8)
+                        .padding(.leading, 4)
+                }
+            }
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isRunning ? accent.opacity(0.28) : Color.white.opacity(0.5), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(isRunning ? palette.accent.opacity(0.34) : palette.borderSubtle, lineWidth: 1)
+        )
+        .shadow(
+            color: Color.black.opacity(isRunning ? (palette.isDark ? 0.25 : 0.06) : (palette.isDark ? 0.12 : 0.025)),
+            radius: isRunning ? 6 : 3,
+            y: isRunning ? 2 : 1
         )
         .onHover { isHovering = $0 }
         .contextMenu {
@@ -869,17 +1204,12 @@ private struct TaskRow: View {
     }
 }
 
-private struct HeaderButtonStyle: ButtonStyle {
-    let isActive: Bool
-    let accent: Color
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(isActive ? accent : Color.secondary)
-            .background(Circle().fill(isActive ? accent.opacity(0.13) : Color.white.opacity(0.45)))
-            .scaleEffect(configuration.isPressed ? 0.92 : 1)
-    }
+private struct AppliedWindowConfig: Equatable {
+    let isPinned: Bool
+    let isDesktopMode: Bool
+    let isMiniMode: Bool
+    let windowOpacity: Double
+    let isDarkTheme: Bool
 }
 
 private struct WindowConfigurator: NSViewRepresentable {
@@ -887,6 +1217,8 @@ private struct WindowConfigurator: NSViewRepresentable {
     let isPinned: Bool
     let isDesktopMode: Bool
     let isMiniMode: Bool
+    let windowOpacity: Double
+    let isDarkTheme: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -894,32 +1226,62 @@ private struct WindowConfigurator: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
-        DispatchQueue.main.async { configure(view.window, coordinator: context.coordinator) }
+        DispatchQueue.main.async {
+            applyIfNeeded(window: view.window, coordinator: context.coordinator)
+        }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async { configure(nsView.window, coordinator: context.coordinator) }
+        let desired = AppliedWindowConfig(
+            isPinned: isPinned,
+            isDesktopMode: isDesktopMode,
+            isMiniMode: isMiniMode,
+            windowOpacity: windowOpacity,
+            isDarkTheme: isDarkTheme
+        )
+        guard context.coordinator.lastConfig != desired || context.coordinator.configuredWindow == nil else {
+            return
+        }
+        DispatchQueue.main.async {
+            applyIfNeeded(window: nsView.window, coordinator: context.coordinator)
+        }
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
         coordinator.stopMonitoring()
     }
 
-    private func configure(_ window: NSWindow?, coordinator: Coordinator) {
+    private func applyIfNeeded(window: NSWindow?, coordinator: Coordinator) {
         guard let window else { return }
+        let desired = AppliedWindowConfig(
+            isPinned: isPinned,
+            isDesktopMode: isDesktopMode,
+            isMiniMode: isMiniMode,
+            windowOpacity: windowOpacity,
+            isDarkTheme: isDarkTheme
+        )
+        guard coordinator.configuredWindow !== window || coordinator.lastConfig != desired else { return }
+
         controller.mainWindow = window
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.isMovableByWindowBackground = true
-        window.backgroundColor = .clear
-        window.isOpaque = false
-        window.hasShadow = true
-        window.hidesOnDeactivate = false
-        window.isReleasedWhenClosed = false
-        window.ignoresMouseEvents = false
-        window.acceptsMouseMovedEvents = true
-        coordinator.startMonitoring(window: window)
+        if coordinator.configuredWindow !== window {
+            coordinator.configuredWindow = window
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.isMovableByWindowBackground = true
+            window.backgroundColor = .clear
+            window.isOpaque = false
+            window.hasShadow = true
+            window.hidesOnDeactivate = false
+            window.isReleasedWhenClosed = false
+            window.ignoresMouseEvents = false
+            window.acceptsMouseMovedEvents = true
+            coordinator.startMonitoring(window: window)
+        }
+
+        coordinator.lastConfig = desired
+        window.alphaValue = CGFloat(windowOpacity)
+        window.appearance = NSAppearance(named: isDarkTheme ? .darkAqua : .aqua)
         coordinator.applyMiniMode(isMiniMode, to: window)
 
         if isMiniMode {
@@ -937,6 +1299,8 @@ private struct WindowConfigurator: NSViewRepresentable {
 
     @MainActor
     final class Coordinator {
+        weak var configuredWindow: NSWindow?
+        var lastConfig: AppliedWindowConfig?
         private var mouseMonitor: Any?
         private var lastMiniMode: Bool?
         private var savedNormalFrame: NSRect?
@@ -946,9 +1310,9 @@ private struct WindowConfigurator: NSViewRepresentable {
                 window.setFrameAutosaveName("DayNote.MainWindow")
                 lastMiniMode = isMini
                 if isMini {
-                    savedNormalFrame = NSRect(x: window.frame.origin.x, y: window.frame.origin.y, width: 370, height: 560)
+                    savedNormalFrame = NSRect(x: window.frame.origin.x, y: window.frame.origin.y, width: 384, height: 610)
                     let topY = window.frame.maxY
-                    window.setFrame(NSRect(x: window.frame.origin.x, y: topY - 60, width: 330, height: 60), display: true, animate: false)
+                    window.setFrame(NSRect(x: window.frame.origin.x, y: topY - 62, width: 344, height: 62), display: true, animate: false)
                 }
                 return
             }
@@ -958,16 +1322,16 @@ private struct WindowConfigurator: NSViewRepresentable {
             if isMini {
                 savedNormalFrame = window.frame
                 let topY = window.frame.maxY
-                let miniFrame = NSRect(x: window.frame.origin.x, y: topY - 60, width: 330, height: 60)
+                let miniFrame = NSRect(x: window.frame.origin.x, y: topY - 62, width: 344, height: 62)
                 window.setFrame(miniFrame, display: true, animate: true)
             } else {
-                let targetSize = savedNormalFrame?.size ?? NSSize(width: 370, height: 560)
+                let targetSize = savedNormalFrame?.size ?? NSSize(width: 384, height: 610)
                 let topY = window.frame.maxY
                 let normalFrame = NSRect(
                     x: window.frame.origin.x,
                     y: max(40, topY - targetSize.height),
-                    width: max(340, targetSize.width),
-                    height: max(460, targetSize.height)
+                    width: max(356, targetSize.width),
+                    height: max(500, targetSize.height)
                 )
                 window.setFrame(normalFrame, display: true, animate: true)
             }

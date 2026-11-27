@@ -13,21 +13,23 @@ struct SettingsView: View {
     @State private var newCountdownTitle = ""
     @State private var newCountdownDate = Calendar.autoupdatingCurrent.date(byAdding: .day, value: 30, to: Date()) ?? Date()
     @State private var newCountdownColor = "orange"
+    @State private var newTemplateName = ""
+    @State private var newTemplateTasksText = ""
 
     private let focusOptions: [(label: String, minutes: Int)] = [
         ("关闭", 0),
-        ("25 分钟（番茄）", 25),
-        ("45 分钟", 45),
-        ("60 分钟", 60)
+        ("每 25 分钟", 25),
+        ("每 45 分钟", 45),
+        ("每 60 分钟", 60)
     ]
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("设置与数据备份")
+                    Text("设置与偏好")
                         .font(.system(size: 22, weight: .bold, design: .rounded))
-                    Text("快捷键 · 防误计 · 倒计时 · 导入导出")
+                    Text("主题外观 · 番茄专注 · 任务模板 · 倒计时 · 数据备份")
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
@@ -58,17 +60,70 @@ struct SettingsView: View {
             }
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 16) {
+                    appearanceSection
                     generalSection
                     timerSection
+                    templateSection
                     countdownSection
                     backupSection
                 }
                 .padding(22)
             }
         }
-        .frame(width: 540, height: 610)
+        .frame(width: 570, height: 660)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    // MARK: - Appearance & Theme
+
+    private var appearanceSection: some View {
+        settingsCard(title: "主题外观与透明度", icon: "paintpalette.fill") {
+            HStack(spacing: 10) {
+                ForEach(DayNoteThemeID.allCases) { theme in
+                    let p = theme.palette
+                    let selected = controller.themeID == theme
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            controller.themeID = theme
+                        }
+                    } label: {
+                        VStack(spacing: 6) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                    .fill(p.swatchPreview)
+                                    .frame(height: 36)
+                                    .overlay(
+                                        Circle()
+                                            .fill(p.accent)
+                                            .frame(width: 14, height: 14)
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                            .stroke(selected ? p.accent : Color.secondary.opacity(0.22), lineWidth: selected ? 2.2 : 1)
+                                    )
+                            }
+                            Text(theme.displayName)
+                                .font(.system(size: 10.5, weight: selected ? .bold : .medium, design: .rounded))
+                                .foregroundStyle(selected ? accent : .secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            HStack(spacing: 12) {
+                Text("窗口不透明度")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                Slider(value: $controller.windowOpacity, in: 0.75...1.0, step: 0.05)
+                    .tint(accent)
+                Text("\(Int((controller.windowOpacity * 100).rounded()))%")
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .frame(width: 40, alignment: .trailing)
+            }
+        }
     }
 
     private var generalSection: some View {
@@ -90,7 +145,45 @@ struct SettingsView: View {
     }
 
     private var timerSection: some View {
-        settingsCard(title: "计时保护与专注提醒", icon: "bell.badge") {
+        settingsCard(title: "番茄专注与防误计", icon: "bell.badge") {
+            Toggle("启用番茄倒计时模式（到点提示并自动计入今日番茄数）", isOn: $controller.pomodoroEnabled)
+
+            if controller.pomodoroEnabled {
+                HStack {
+                    Text("单轮番茄时长")
+                        .font(.system(size: 12, design: .rounded))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Picker("", selection: $controller.pomodoroMinutes) {
+                        Text("25 分钟").tag(25)
+                        Text("45 分钟").tag(45)
+                        Text("60 分钟").tag(60)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 220)
+                }
+            } else {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("正向计时休息提醒")
+                            .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                        Text("达到设定分钟数时轻声提醒休息，不中断计时")
+                            .font(.system(size: 10.5, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Picker("", selection: $controller.focusReminderMinutes) {
+                        ForEach(focusOptions, id: \.minutes) { option in
+                            Text(option.label).tag(option.minutes)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 130)
+                }
+            }
+
+            Divider().opacity(0.5)
+
             Toggle("休眠 / 锁屏防误计（唤醒后询问是否扣除离开时长）", isOn: $controller.sleepProtectionEnabled)
 
             if controller.sleepProtectionEnabled {
@@ -106,28 +199,73 @@ struct SettingsView: View {
                         Text("离开 ≥ 10 分钟").tag(10)
                     }
                     .labelsHidden()
-                    .frame(width: 150)
+                    .frame(width: 145)
+                }
+            }
+        }
+    }
+
+    private var templateSection: some View {
+        settingsCard(title: "任务模板库", icon: "doc.on.clipboard") {
+            if store.taskTemplates.isEmpty {
+                Text("可以把工作日、周末或模考日的不同任务组合保存成模板，在首页底部一键套用。")
+                    .font(.system(size: 11, design: .rounded))
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(store.taskTemplates) { template in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(template.name)
+                                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                                Text(template.items.map(\.title).joined(separator: " · "))
+                                    .font(.system(size: 10.5, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Button("应用到今日") {
+                                store.applyTemplate(template, to: Date(), replaceExisting: false)
+                                showStatus("已将模板「\(template.name)」追加到今日任务")
+                            }
+                            .controlSize(.small)
+                            Button(role: .destructive) {
+                                store.deleteTemplate(id: template.id)
+                            } label: {
+                                Image(systemName: "trash").font(.system(size: 11))
+                            }
+                            .buttonStyle(.borderless)
+                        }
+                    }
                 }
             }
 
             Divider().opacity(0.5)
 
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("连续专注休息提醒")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                    Text("达到设定分钟数时轻声提醒休息，不打断已计时间")
-                        .font(.system(size: 11, design: .rounded))
-                        .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                TextField("模板名（如：周末冲刺）", text: $newTemplateName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 145)
+                TextField("任务列表（用中文或英文逗号分隔）", text: $newTemplateTasksText)
+                    .textFieldStyle(.roundedBorder)
+                Button("新建") {
+                    let parts = newTemplateTasksText
+                        .replacingOccurrences(of: "，", with: ",")
+                        .split(separator: ",")
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                    let items = parts.map { TaskTemplateItem(title: $0, isRecurring: true) }
+                    store.addTemplate(name: newTemplateName, items: items)
+                    newTemplateName = ""
+                    newTemplateTasksText = ""
+                    showStatus("已创建任务模板")
                 }
-                Spacer()
-                Picker("", selection: $controller.focusReminderMinutes) {
-                    ForEach(focusOptions, id: \.minutes) { option in
-                        Text(option.label).tag(option.minutes)
-                    }
-                }
-                .labelsHidden()
-                .frame(width: 150)
+                .buttonStyle(.borderedProminent)
+                .tint(accent)
+                .disabled(
+                    newTemplateName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                    newTemplateTasksText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
             }
         }
     }
@@ -135,7 +273,7 @@ struct SettingsView: View {
     private var countdownSection: some View {
         settingsCard(title: "首页倒计时", icon: "flag.checkered") {
             if store.countdowns.isEmpty {
-                Text("添加重要节点（如考试日、答辩日），将在首页顶部显示剩余天数；也可以在日历中直接对任意未来日期添加。")
+                Text("添加重要节点（如考试日、答辩日），将在首页卡片中显示剩余天数；也可以在日历中直接添加。")
                     .font(.system(size: 11, design: .rounded))
                     .foregroundStyle(.secondary)
             } else {
@@ -302,7 +440,7 @@ struct SettingsView: View {
         do {
             let data = try Data(contentsOf: url)
             try store.importBackup(from: data)
-            showStatus("已成功恢复备份（包含全部任务、标签、目标与倒计时）")
+            showStatus("已成功恢复备份（包含任务、随记、模板、标签、目标与倒计时）")
         } catch {
             showStatus("导入失败，请确认文件是 DayNote 导出的 JSON 备份：\(error.localizedDescription)", isError: true)
         }

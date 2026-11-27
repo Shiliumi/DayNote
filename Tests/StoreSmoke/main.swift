@@ -122,11 +122,32 @@ struct StoreSmokeTest {
             store.addCountdown(title: "考研初试", targetDate: examDay)
             precondition(store.upcomingCountdowns(from: today).first?.daysRemaining == 20)
 
+            // 9.5 Daily Notes, Task Templates, Pomodoros, History Search, 12-week Heatmap
+            store.setNote("今天408数据结构错题整理完成", on: history)
+            precondition(store.hasNote(on: history))
+            store.incrementPomodoro(on: today)
+            precondition(store.pomodoroCount(on: today) == 1)
+
+            store.saveDayAsTemplate(name: "冲刺日", from: today)
+            precondition(store.taskTemplates.count == 1)
+            let planDay = Calendar.autoupdatingCurrent.date(byAdding: .day, value: 7, to: today)!
+            store.applyTemplate(store.taskTemplates[0], to: planDay, replaceExisting: true)
+            precondition(store.tasks(on: planDay).count == store.tasks(on: today).count)
+
+            let noteMatches = store.searchHistory(query: "数据结构", at: today)
+            precondition(noteMatches.contains { $0.dayKey == TaskStore.dayKey(for: history) })
+            let tagMatches = store.searchHistory(query: "模拟考试", at: today)
+            precondition(tagMatches.contains { $0.dayKey == TaskStore.dayKey(for: history) })
+
+            let heatmap = store.heatmapStats(weeks: 12, endingAt: today, at: today)
+            precondition(heatmap.count == 12 && heatmap.allSatisfy { $0.count == 7 })
+
             // 10. Full JSON backup round-trip & CSV export
             let jsonData = try! store.exportJSONData(at: today)
             let csv = store.exportCSVString(at: today)
             precondition(csv.contains("任务 A-改"))
             precondition(csv.contains("模拟考试"))
+            precondition(csv.contains("数据结构"))
 
             let suite2 = "DayNote.StoreSmoke.Restore.\(UUID().uuidString)"
             let defaults2 = UserDefaults(suiteName: suite2)!
@@ -136,8 +157,11 @@ struct StoreSmokeTest {
             precondition(restored.goalMinutes(on: today) == 360)
             precondition(restored.tags(on: history).first?.title == "模拟考试")
             precondition(restored.upcomingCountdowns(from: today).first?.event.title == "考研初试")
+            precondition(restored.note(on: history).contains("数据结构"))
+            precondition(restored.taskTemplates.first?.name == "冲刺日")
+            precondition(restored.pomodoroCount(on: today) == 1)
 
-            print("Store smoke tests passed (all v3.0 checks)")
+            print("Store smoke tests passed (all v3.1 checks)")
         }
     }
 }

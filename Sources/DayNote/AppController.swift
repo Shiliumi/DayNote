@@ -1,14 +1,28 @@
 import AppKit
 import Carbon.HIToolbox
+import Combine
 import Foundation
 import ServiceManagement
 import SwiftUI
 import UserNotifications
 
 @MainActor
-final class AppController: ObservableObject {
+final class LiveClock: ObservableObject {
+    @Published var now: Date = Date()
+}
+
+@MainActor
+final class AppController: NSObject, ObservableObject, NSPopoverDelegate {
     static weak var shared: AppController?
 
+    let clock = LiveClock()
+
+    @Published var themeID: DayNoteThemeID {
+        didSet { UserDefaults.standard.set(themeID.rawValue, forKey: Keys.themeID) }
+    }
+    @Published var windowOpacity: Double {
+        didSet { UserDefaults.standard.set(windowOpacity, forKey: Keys.windowOpacity) }
+    }
     @Published var isMiniMode: Bool {
         didSet { UserDefaults.standard.set(isMiniMode, forKey: Keys.miniMode) }
     }
@@ -30,9 +44,25 @@ final class AppController: ObservableObject {
             resetFocusReminderTracking()
         }
     }
+    @Published var pomodoroEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(pomodoroEnabled, forKey: Keys.pomodoroEnabled)
+            resetPomodoroTracking()
+            updateStatusBarTitle()
+        }
+    }
+    @Published var pomodoroMinutes: Int {
+        didSet {
+            UserDefaults.standard.set(pomodoroMinutes, forKey: Keys.pomodoroMinutes)
+            resetPomodoroTracking()
+            updateStatusBarTitle()
+        }
+    }
     @Published var sleepPrompt: SleepRecoveryPrompt?
     @Published var focusReminderMessage: String?
     @Published var launchAtLoginError: String?
+
+    var palette: DayNotePalette { themeID.palette }
 
     weak var mainWindow: NSWindow?
     private weak var store: TaskStore?
@@ -40,7 +70,27 @@ final class AppController: ObservableObject {
 
     private var statusItem: NSStatusItem?
     private var statusPopover: NSPopover?
-    private var statusTimer: Timer?
+    private var activeTickTimer: Timer?
+    private var dayRolloverTimer: Timer?
+    private var cancellables: Set<AnyCancellable> = []
+
+    private lazy var timerSymbolImage: NSImage? = {
+        let img = NSImage(systemSymbolName: "timer", accessibilityDescription: "计时中")
+        img?.isTemplate = true
+        return img
+    }()
+
+    private lazy var noteSymbolImage: NSImage? = {
+        let img = NSImage(systemSymbolName: "note.text", accessibilityDescription: "今日便笺")
+        img?.isTemplate = true
+        return img
+    }()
+
+    private lazy var pomodoroSymbolImage: NSImage? = {
+        let img = NSImage(systemSymbolName: "flame.fill", accessibilityDescription: "番茄专注中")
+        img?.isTemplate = true
+        return img
+    }()
 
     private var awayStartedAt: Date?
     private var awayTaskID: UUID?
@@ -49,6 +99,8 @@ final class AppController: ObservableObject {
 
     private var trackedTimerStart: Date?
     private var lastNotifiedMilestone: Int = 0
+    private var completedPomodoroForStart: Date?
+    private var lastObservedDayKey: String = TaskStore.dayKey(for: Date())
 
     private var hotKeyEventHandler: EventHandlerRef?
     private var toggleWindowHotKeyRef: EventHotKeyRef?
@@ -58,27 +110,56 @@ final class AppController: ObservableObject {
     private var distributedObservers: [NSObjectProtocol] = []
 
     private enum Keys {
+        static let themeID = "daynote.theme-id"
+        static let windowOpacity = "daynote.window-opacity"
         static let miniMode = "daynote.mini-mode"
         static let globalHotkeys = "daynote.global-hotkeys"
         static let sleepProtection = "daynote.sleep-protection"
         static let sleepThreshold = "daynote.sleep-threshold-minutes"
         static let focusReminderMinutes = "daynote.focus-reminder-minutes"
+        static let pomodoroEnabled = "daynote.pomodoro-enabled"
+        static let pomodoroMinutes = "daynote.pomodoro-minutes"
     }
 
-    init() {
+    override init() {
         let defaults = UserDefaults.standard
+        let savedTheme = defaults.string(forKey: Keys.themeID).flatMap(DayNoteThemeID.init(rawValue:)) ?? .warmApricot
+        self.themeID = savedTheme
+        let savedOpacity = defaults.object(forKey: Keys.windowOpacity) as? Double ?? 1.0
+        self.windowOpacity = min(1.0, max(0.75, savedOpacity))
         self.isMiniMode = defaults.bool(forKey: Keys.miniMode)
         self.globalHotkeysEnabled = defaults.object(forKey: Keys.globalHotkeys) as? Bool ?? true
         self.sleepProtectionEnabled = defaults.object(forKey: Keys.sleepProtection) as? Bool ?? true
         let savedThreshold = defaults.integer(forKey: Keys.sleepThreshold)
         self.sleepThresholdMinutes = savedThreshold > 0 ? savedThreshold : 3
         self.focusReminderMinutes = defaults.integer(forKey: Keys.focusReminderMinutes)
+        self.pomodoroEnabled = defaults.bool(forKey: Keys.pomodoroEnabled)
+        let savedPomo = defaults.integer(forKey: Keys.pomodoroMinutes)
+        self.pomodoroMinutes = savedPomo > 0 ? savedPomo : 25
 
+        super.init()
         Self.shared = self
     }
 
     func attach(store: TaskStore) {
         self.store = store
+        cancellables.removeAll()
+
+        store.$activeTaskID
+            .combineLatest(store.$timerStartedAt)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _, _ in
+                self?.syncTimersWithRunningState()
+                self?.updateStatusBarTitle()
+            }
+            .store(in: &cancellables)
+
+        store.$days
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateStatusBarTitle()
+            }
+            .store(in: &cancellables)
     }
 
     /// Called once NSApplication finishes launching so AppKit/Carbon/StatusBar are fully initialized.
@@ -88,12 +169,119 @@ final class AppController: ObservableObject {
         setupStatusBarItem()
         installSleepObservers()
         updateHotkeys()
+        syncTimersWithRunningState()
+        startDayRolloverTimer()
     }
 
-    // MARK: - Native Menu Bar Status Item (NSStatusBar + NSPopover)
+    // MARK: - Smart Low-Power Ticker (0 Hz when idle, 1 Hz only while timing)
+
+    private func syncTimersWithRunningState() {
+        let running = store?.isTimerRunning == true
+        if running {
+            guard activeTickTimer == nil else { return }
+            let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    self?.handleActiveTick()
+                }
+            }
+            timer.tolerance = 0.1
+            RunLoop.main.add(timer, forMode: .common)
+            activeTickTimer = timer
+            handleActiveTick()
+        } else {
+            activeTickTimer?.invalidate()
+            activeTickTimer = nil
+            clock.now = Date()
+            resetFocusReminderTracking()
+            resetPomodoroTracking()
+        }
+    }
+
+    private func startDayRolloverTimer() {
+        dayRolloverTimer?.invalidate()
+        let timer = Timer(timeInterval: 60.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.checkDayRollover()
+            }
+        }
+        timer.tolerance = 15.0
+        RunLoop.main.add(timer, forMode: .common)
+        dayRolloverTimer = timer
+    }
+
+    private func checkDayRollover() {
+        let now = Date()
+        let currentKey = TaskStore.dayKey(for: now)
+        if currentKey != lastObservedDayKey {
+            lastObservedDayKey = currentKey
+            store?.prepareForCurrentDay(at: now)
+            clock.now = now
+            updateStatusBarTitle()
+        }
+    }
+
+    private func handleActiveTick() {
+        let now = Date()
+        clock.now = now
+        let currentKey = TaskStore.dayKey(for: now)
+        if currentKey != lastObservedDayKey {
+            lastObservedDayKey = currentKey
+            store?.prepareForCurrentDay(at: now)
+        }
+        evaluatePomodoro(at: now)
+        evaluateFocusReminder(at: now)
+        updateStatusBarTitle(at: now)
+    }
+
+    // MARK: - Pomodoro Countdown
+
+    func pomodoroRemainingSeconds(at now: Date) -> TimeInterval? {
+        guard pomodoroEnabled, let store, store.isTimerRunning, let started = store.timerStartedAt else {
+            return nil
+        }
+        let target = TimeInterval(max(1, pomodoroMinutes) * 60)
+        let elapsed = max(0, now.timeIntervalSince(started))
+        return max(0, target - elapsed)
+    }
+
+    func pomodoroProgress(at now: Date) -> Double {
+        guard pomodoroEnabled, let store, store.isTimerRunning, let started = store.timerStartedAt else {
+            return 0
+        }
+        let target = TimeInterval(max(1, pomodoroMinutes) * 60)
+        let elapsed = max(0, now.timeIntervalSince(started))
+        return min(1, elapsed / target)
+    }
+
+    private func evaluatePomodoro(at now: Date) {
+        guard pomodoroEnabled, let store, store.isTimerRunning, let started = store.timerStartedAt else {
+            resetPomodoroTracking()
+            return
+        }
+        guard completedPomodoroForStart != started else { return }
+        let target = TimeInterval(max(1, pomodoroMinutes) * 60)
+        if now.timeIntervalSince(started) >= target {
+            completedPomodoroForStart = started
+            let taskName = store.activeTask?.title ?? "当前任务"
+            store.incrementPomodoro(on: now)
+            store.pauseActiveTimer(at: now)
+            let count = store.pomodoroCount(on: now)
+            let message = "完成第 \(count) 个番茄（\(pomodoroMinutes) 分钟 · \(taskName)），休息一下吧！"
+            focusReminderMessage = message
+            NSSound(named: NSSound.Name("Glass"))?.play()
+            postLocalNotification(title: "🍅 番茄钟完成", body: message)
+            showMainWindow()
+        }
+    }
+
+    private func resetPomodoroTracking() {
+        completedPomodoroForStart = nil
+    }
+
+    // MARK: - Native Menu Bar Status Item (NSStatusBar + Lazy NSPopover)
 
     private func setupStatusBarItem() {
-        guard statusItem == nil, let store else { return }
+        guard statusItem == nil else { return }
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
@@ -107,36 +295,25 @@ final class AppController: ObservableObject {
         let popover = NSPopover()
         popover.behavior = .transient
         popover.animates = true
-        popover.contentViewController = NSHostingController(
-            rootView: MenuBarContentView(store: store, controller: self)
-        )
+        popover.delegate = self
         statusPopover = popover
 
         updateStatusBarTitle()
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.updateStatusBarTitle()
-            }
-        }
-        if let statusTimer {
-            RunLoop.main.add(statusTimer, forMode: .common)
-        }
     }
 
-    func updateStatusBarTitle() {
+    func updateStatusBarTitle(at now: Date = Date()) {
         guard let button = statusItem?.button, let store else { return }
-        let now = Date()
         if let active = store.activeTask {
-            let symbol = NSImage(systemSymbolName: "timer", accessibilityDescription: "计时中")
-            symbol?.isTemplate = true
-            button.image = symbol
             let title = shortTitle(active.title)
-            let elapsedText = ContentView.formatDuration(store.activeElapsed(at: now))
-            button.title = " \(title) \(elapsedText)"
+            if let remaining = pomodoroRemainingSeconds(at: now) {
+                button.image = pomodoroSymbolImage
+                button.title = " \(title) \(ContentView.formatDuration(remaining))"
+            } else {
+                button.image = timerSymbolImage
+                button.title = " \(title) \(ContentView.formatDuration(store.activeElapsed(at: now)))"
+            }
         } else {
-            let symbol = NSImage(systemSymbolName: "note.text", accessibilityDescription: "今日便笺")
-            symbol?.isTemplate = true
-            button.image = symbol
+            button.image = noteSymbolImage
             let total = store.totalElapsed(on: now, at: now)
             if total > 0 {
                 let mins = Int(total) / 60
@@ -155,12 +332,22 @@ final class AppController: ObservableObject {
     }
 
     @objc private func toggleStatusPopover(_ sender: AnyObject?) {
-        guard let popover = statusPopover, let button = statusItem?.button else { return }
+        guard let popover = statusPopover, let button = statusItem?.button, let store else { return }
         if popover.isShown {
             popover.performClose(sender)
         } else {
+            popover.contentViewController = NSHostingController(
+                rootView: MenuBarContentView(store: store, controller: self, clock: clock)
+            )
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.makeKey()
+        }
+    }
+
+    nonisolated func popoverDidClose(_ notification: Notification) {
+        Task { @MainActor in
+            // Release view hierarchy while closed so idle memory & CPU stay near zero.
+            self.statusPopover?.contentViewController = nil
         }
     }
 
@@ -212,10 +399,10 @@ final class AppController: ObservableObject {
         }
     }
 
-    // MARK: - Focus Reminder (Pomodoro)
+    // MARK: - Focus Reminder
 
     func evaluateFocusReminder(at now: Date) {
-        guard focusReminderMinutes > 0, let store, store.isTimerRunning, let started = store.timerStartedAt else {
+        guard !pomodoroEnabled, focusReminderMinutes > 0, let store, store.isTimerRunning, let started = store.timerStartedAt else {
             resetFocusReminderTracking()
             return
         }
@@ -397,7 +584,6 @@ final class AppController: ObservableObject {
         guard status == noErr else { return }
 
         let signature: OSType = 0x444E5445 // 'DNTE'
-        // Option + Space -> Toggle main window
         let winHotKeyID = EventHotKeyID(signature: signature, id: 1)
         RegisterEventHotKey(
             UInt32(kVK_Space),
@@ -407,7 +593,6 @@ final class AppController: ObservableObject {
             0,
             &toggleWindowHotKeyRef
         )
-        // Option + Shift + Space -> Toggle timer
         let timerHotKeyID = EventHotKeyID(signature: signature, id: 2)
         RegisterEventHotKey(
             UInt32(kVK_Space),

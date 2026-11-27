@@ -89,6 +89,39 @@ struct CountdownEvent: Identifiable, Codable, Equatable {
     }
 }
 
+struct TaskTemplateItem: Identifiable, Codable, Equatable {
+    let id: UUID
+    var title: String
+    var isRecurring: Bool
+
+    init(id: UUID = UUID(), title: String, isRecurring: Bool = true) {
+        self.id = id
+        self.title = title
+        self.isRecurring = isRecurring
+    }
+}
+
+struct TaskTemplate: Identifiable, Codable, Equatable {
+    let id: UUID
+    var name: String
+    var items: [TaskTemplateItem]
+
+    init(id: UUID = UUID(), name: String, items: [TaskTemplateItem]) {
+        self.id = id
+        self.name = name
+        self.items = items
+    }
+}
+
+struct HistorySearchMatch: Identifiable {
+    let dayKey: String
+    let date: Date
+    let snippets: [String]
+    let elapsedSeconds: TimeInterval
+
+    var id: String { dayKey }
+}
+
 struct DayNoteBackup: Codable {
     var formatVersion: Int
     var exportedAt: Date
@@ -96,6 +129,56 @@ struct DayNoteBackup: Codable {
     var calendarTags: [String: [CalendarTag]]
     var dailyGoals: [String: Int]
     var countdowns: [CountdownEvent]
+    var dailyNotes: [String: String]
+    var taskTemplates: [TaskTemplate]
+    var pomodoroCounts: [String: Int]
+
+    enum CodingKeys: String, CodingKey {
+        case formatVersion
+        case exportedAt
+        case archive
+        case calendarTags
+        case dailyGoals
+        case countdowns
+        case dailyNotes
+        case taskTemplates
+        case pomodoroCounts
+    }
+
+    init(
+        formatVersion: Int,
+        exportedAt: Date,
+        archive: StoredArchive,
+        calendarTags: [String: [CalendarTag]],
+        dailyGoals: [String: Int],
+        countdowns: [CountdownEvent],
+        dailyNotes: [String: String] = [:],
+        taskTemplates: [TaskTemplate] = [],
+        pomodoroCounts: [String: Int] = [:]
+    ) {
+        self.formatVersion = formatVersion
+        self.exportedAt = exportedAt
+        self.archive = archive
+        self.calendarTags = calendarTags
+        self.dailyGoals = dailyGoals
+        self.countdowns = countdowns
+        self.dailyNotes = dailyNotes
+        self.taskTemplates = taskTemplates
+        self.pomodoroCounts = pomodoroCounts
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        formatVersion = try c.decode(Int.self, forKey: .formatVersion)
+        exportedAt = try c.decode(Date.self, forKey: .exportedAt)
+        archive = try c.decode(StoredArchive.self, forKey: .archive)
+        calendarTags = try c.decodeIfPresent([String: [CalendarTag]].self, forKey: .calendarTags) ?? [:]
+        dailyGoals = try c.decodeIfPresent([String: Int].self, forKey: .dailyGoals) ?? [:]
+        countdowns = try c.decodeIfPresent([CountdownEvent].self, forKey: .countdowns) ?? []
+        dailyNotes = try c.decodeIfPresent([String: String].self, forKey: .dailyNotes) ?? [:]
+        taskTemplates = try c.decodeIfPresent([TaskTemplate].self, forKey: .taskTemplates) ?? []
+        pomodoroCounts = try c.decodeIfPresent([String: Int].self, forKey: .pomodoroCounts) ?? [:]
+    }
 }
 
 struct SleepRecoveryPrompt: Identifiable, Equatable {

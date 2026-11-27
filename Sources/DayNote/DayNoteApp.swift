@@ -16,9 +16,9 @@ struct DayNoteApp: App {
 
     var body: some Scene {
         Window("今日便笺", id: "main") {
-            ContentView(store: store, controller: controller)
+            ContentView(store: store, controller: controller, clock: controller.clock)
         }
-        .defaultSize(width: 370, height: 560)
+        .defaultSize(width: 384, height: 610)
         .windowStyle(.hiddenTitleBar)
     }
 }

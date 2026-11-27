@@ -16,6 +16,7 @@ struct MonthlyStatisticsView: View {
     @State private var visibleMonth: Date
     @State private var visibleWeekDate: Date
     @State private var selectedX: Int?
+    @State private var hoveredHeatmapDay: DayStats?
     private let calendar = Calendar.autoupdatingCurrent
 
     init(store: TaskStore, initialMonth: Date, accent: Color) {
@@ -38,13 +39,14 @@ struct MonthlyStatisticsView: View {
         let taskTotals = period == .month ? store.taskTimeTotals(inMonthContaining: visibleMonth) : store.taskTimeTotals(inWeekContaining: visibleWeekDate)
         let streak = store.currentStreak()
         let bestStreak = store.bestStreak()
+        let totalPomodoros = stats.reduce(0) { $0 + store.pomodoroCount(on: $1.date) }
 
         return VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(period == .month ? "月度统计" : "本周统计")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
-                    Text("专注时长 · 连续打卡 · 柱状图悬停/点击查看详情")
+                    Text("专注时长 · 连续打卡 · 12 周学习热力图")
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
@@ -71,13 +73,19 @@ struct MonthlyStatisticsView: View {
                     periodHeader
 
                     HStack(spacing: 10) {
-                        metricCard(title: "总专注", value: longDuration(totalSeconds), subtitle: nil, icon: "timer")
+                        metricCard(
+                            title: "总专注",
+                            value: longDuration(totalSeconds),
+                            subtitle: totalPomodoros > 0 ? "🍅 \(totalPomodoros) 个番茄" : nil,
+                            icon: "timer"
+                        )
                         metricCard(title: period == .month ? "月达成率" : "周达成率", value: "\(Int((rate * 100).rounded()))%", subtitle: nil, icon: "target")
                         metricCard(title: "学习天数", value: "\(studyDays)/\(max(1, elapsedDayCount)) 天", subtitle: nil, icon: "calendar.badge.checkmark")
                         metricCard(title: "连续打卡", value: "\(streak) 天", subtitle: "最长 \(bestStreak) 天", icon: "flame.fill")
                     }
 
                     chartSection(stats: stats)
+                    heatmapSection
 
                     VStack(alignment: .leading, spacing: 12) {
                         Text("任务时长排行")
@@ -112,8 +120,92 @@ struct MonthlyStatisticsView: View {
                 .padding(22)
             }
         }
-        .frame(width: 740, height: 640)
+        .frame(width: 750, height: 660)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    // MARK: - 12-Week Study Heatmap
+
+    private var heatmapSection: some View {
+        let columns = store.heatmapStats(weeks: 12)
+        let todayStart = calendar.startOfDay(for: Date())
+        let weekdayLabels = ["一", "", "三", "", "五", "", "日"]
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("近 12 周学习热力图")
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                Spacer()
+                if let hovered = hoveredHeatmapDay {
+                    let goalMin = store.goalMinutes(on: hovered.date)
+                    let pct = StudyGoal.percent(elapsedSeconds: hovered.elapsedSeconds, goalMinutes: goalMin)
+                    Text("\(hovered.date.formatted(.dateTime.month().day())) · 专注 \(longDuration(hovered.elapsedSeconds)) · 达成 \(pct)%")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(accent)
+                } else {
+                    HStack(spacing: 4) {
+                        Text("少").font(.system(size: 9.5)).foregroundStyle(.secondary)
+                        ForEach([0.0, 0.25, 0.5, 0.75, 1.0], id: \.self) { level in
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(heatmapColor(rate: level, hasActivity: level > 0))
+                                .frame(width: 11, height: 11)
+                        }
+                        Text("多").font(.system(size: 9.5)).foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            HStack(alignment: .top, spacing: 6) {
+                VStack(spacing: 4) {
+                    ForEach(0..<7, id: \.self) { row in
+                        Text(weekdayLabels[row])
+                            .font(.system(size: 9, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 14, height: 14)
+                    }
+                }
+
+                HStack(spacing: 5) {
+                    ForEach(Array(columns.enumerated()), id: \.offset) { _, week in
+                        VStack(spacing: 4) {
+                            ForEach(week) { day in
+                                let isFuture = calendar.startOfDay(for: day.date) > todayStart
+                                let rate = StudyGoal.rate(elapsedSeconds: day.elapsedSeconds, goalMinutes: store.goalMinutes(on: day.date))
+                                RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                                    .fill(isFuture ? Color.clear : heatmapColor(rate: rate, hasActivity: day.hasActivity))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                                            .stroke(
+                                                hoveredHeatmapDay?.id == day.id ? accent : Color.clear,
+                                                lineWidth: 1.2
+                                            )
+                                    )
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 14)
+                                    .onHover { inside in
+                                        if inside && !isFuture {
+                                            hoveredHeatmapDay = day
+                                        } else if !inside && hoveredHeatmapDay?.id == day.id {
+                                            hoveredHeatmapDay = nil
+                                        }
+                                    }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .statSection()
+    }
+
+    private func heatmapColor(rate: Double, hasActivity: Bool) -> Color {
+        guard hasActivity else { return Color.secondary.opacity(0.11) }
+        switch rate {
+        case ..<0.25: return accent.opacity(0.24)
+        case ..<0.55: return accent.opacity(0.46)
+        case ..<0.85: return accent.opacity(0.72)
+        default: return accent
+        }
     }
 
     private func chartSection(stats: [DayStats]) -> some View {
@@ -203,7 +295,7 @@ struct MonthlyStatisticsView: View {
                     AxisValueLabel(format: Decimal.FormatStyle.number.precision(.fractionLength(1)))
                 }
             }
-            .frame(height: 195)
+            .frame(height: 185)
         }
         .statSection()
     }
@@ -299,9 +391,9 @@ struct MonthlyStatisticsView: View {
 
 private extension View {
     func statSection() -> some View {
-        padding(18)
+        padding(16)
             .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
                     .fill(Color.secondary.opacity(0.055))
             )
     }
