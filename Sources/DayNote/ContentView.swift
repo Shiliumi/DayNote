@@ -11,6 +11,8 @@ struct ContentView: View {
     @State private var observedTodayKey = TaskStore.dayKey(for: Date())
     @State private var newTaskTitle = ""
     @State private var newTaskIsRecurring = true
+    @State private var newTaskCategoryID: UUID?
+    @State private var filterCategoryID: UUID?
     @State private var showingResetAlert = false
     @State private var showingCalendar = false
     @State private var showingStatistics = false
@@ -98,14 +100,19 @@ struct ContentView: View {
             SettingsView(store: store, controller: controller, accent: palette.accent)
         }
         .sheet(item: $editingRequest) { request in
-            TaskEditView(request: request, accent: palette.accent) { title, completed, seconds, isRecurring in
+            TaskEditView(
+                request: request,
+                categories: store.categories,
+                accent: palette.accent
+            ) { title, completed, seconds, isRecurring, categoryID in
                 store.updateTask(
                     id: request.task.id,
                     on: request.date,
                     title: title,
                     isCompleted: completed,
                     elapsedSeconds: seconds,
-                    isRecurring: isRecurring
+                    isRecurring: isRecurring,
+                    categoryID: .some(categoryID)
                 )
             }
         }
@@ -225,7 +232,9 @@ struct ContentView: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
-            taskList(dayTasks, at: now)
+            categoryFilterBar(for: dayTasks)
+
+            taskList(filteredTasks(from: dayTasks), allDayTasksCount: dayTasks.count, at: now)
 
             addTaskBar
                 .padding(.horizontal, 14)
@@ -729,11 +738,63 @@ struct ContentView: View {
         )
     }
 
+    // MARK: - Category Filter Bar
+
+    @ViewBuilder
+    private func categoryFilterBar(for dayTasks: [DailyTask]) -> some View {
+        let presentIDs = Set(dayTasks.compactMap(\.categoryID))
+        let visibleCategories = store.categories.filter { presentIDs.contains($0.id) }
+        if visibleCategories.count >= 2 {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    filterChip(title: "全部", color: palette.accent, isSelected: filterCategoryID == nil) {
+                        filterCategoryID = nil
+                    }
+                    ForEach(visibleCategories) { cat in
+                        filterChip(
+                            title: cat.name,
+                            color: CalendarTagPalette.color(named: cat.colorName),
+                            isSelected: filterCategoryID == cat.id
+                        ) {
+                            filterCategoryID = (filterCategoryID == cat.id) ? nil : cat.id
+                        }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 6)
+            }
+        }
+    }
+
+    private func filterChip(title: String, color: Color, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(isSelected ? Color.white : color)
+                    .frame(width: 6, height: 6)
+                Text(title)
+                    .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+            }
+            .foregroundStyle(isSelected ? Color.white : palette.inkSecondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(isSelected ? color : palette.surfaceElevated))
+            .overlay(Capsule().stroke(isSelected ? Color.clear : palette.borderSubtle, lineWidth: 0.8))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func filteredTasks(from dayTasks: [DailyTask]) -> [DailyTask] {
+        guard let filterCategoryID else { return dayTasks }
+        let matched = dayTasks.filter { $0.categoryID == filterCategoryID }
+        return matched.isEmpty ? dayTasks : matched
+    }
+
     // MARK: - Task List
 
     @ViewBuilder
-    private func taskList(_ dayTasks: [DailyTask], at now: Date) -> some View {
-        if dayTasks.isEmpty {
+    private func taskList(_ dayTasks: [DailyTask], allDayTasksCount: Int, at now: Date) -> some View {
+        if allDayTasksCount == 0 {
             VStack(spacing: 10) {
                 Image(systemName: "sparkles")
                     .font(.system(size: 28, weight: .light))
@@ -762,6 +823,8 @@ struct ContentView: View {
                     ForEach(dayTasks) { task in
                         TaskRow(
                             task: task,
+                            category: store.category(for: task.categoryID),
+                            allCategories: store.categories,
                             elapsed: store.elapsed(for: task, on: selectedDate, at: now),
                             isRunning: store.activeDayKey == TaskStore.dayKey(for: selectedDate) && store.activeTaskID == task.id,
                             canStartTimer: calendar.isDate(selectedDate, inSameDayAs: now),
@@ -780,6 +843,12 @@ struct ContentView: View {
                             },
                             onToggleRecurring: {
                                 store.toggleRecurring(for: task.id, on: selectedDate)
+                            },
+                            onSelectCategory: { categoryID in
+                                store.setCategory(categoryID, for: task.id, on: selectedDate)
+                            },
+                            onApplyCategoryToAllSameName: { categoryID in
+                                store.applyCategoryToAllTasksNamed(task.title, categoryID: categoryID)
                             },
                             onEdit: {
                                 editingRequest = TaskEditRequest(task: task, date: selectedDate)
@@ -826,6 +895,48 @@ struct ContentView: View {
                 .foregroundStyle(palette.inkPrimary)
                 .focused($isAddingTask)
                 .onSubmit(addTask)
+
+            Menu {
+                Button {
+                    newTaskCategoryID = nil
+                } label: {
+                    Label("无分类", systemImage: newTaskCategoryID == nil ? "checkmark.circle.fill" : "circle")
+                }
+                if !store.categories.isEmpty {
+                    Divider()
+                    ForEach(store.categories) { cat in
+                        Button {
+                            newTaskCategoryID = cat.id
+                        } label: {
+                            Label(cat.name, systemImage: newTaskCategoryID == cat.id ? "checkmark.circle.fill" : "circle.fill")
+                        }
+                    }
+                }
+                Divider()
+                Button {
+                    showingSettings = true
+                } label: {
+                    Label("管理分类…", systemImage: "slider.horizontal.3")
+                }
+            } label: {
+                let selectedCat = store.category(for: newTaskCategoryID)
+                let catColor = selectedCat.map { CalendarTagPalette.color(named: $0.colorName) } ?? palette.inkSecondary
+                HStack(spacing: 3) {
+                    Circle()
+                        .fill(selectedCat != nil ? catColor : palette.inkSecondary.opacity(0.45))
+                        .frame(width: 6, height: 6)
+                    Text(selectedCat?.name ?? "分类")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(selectedCat != nil ? catColor : palette.inkSecondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3.5)
+                .background(Capsule().fill(selectedCat != nil ? catColor.opacity(0.13) : palette.borderSubtle))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .help("为新任务选择分类")
 
             Button {
                 newTaskIsRecurring.toggle()
@@ -896,7 +1007,8 @@ struct ContentView: View {
     }
 
     private func addTask() {
-        store.addTask(title: newTaskTitle, on: selectedDate, isRecurring: newTaskIsRecurring)
+        let effectiveCat = newTaskCategoryID ?? filterCategoryID
+        store.addTask(title: newTaskTitle, on: selectedDate, isRecurring: newTaskIsRecurring, categoryID: effectiveCat)
         newTaskTitle = ""
         isAddingTask = true
     }
@@ -939,25 +1051,34 @@ struct TaskEditRequest: Identifiable {
 
 private struct TaskEditView: View {
     let request: TaskEditRequest
+    let categories: [TaskCategory]
     let accent: Color
-    let onSave: (String, Bool, TimeInterval, Bool) -> Void
+    let onSave: (String, Bool, TimeInterval, Bool, UUID?) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var title: String
     @State private var isCompleted: Bool
     @State private var isRecurring: Bool
+    @State private var categoryID: UUID?
     @State private var totalMinutes: Int
     @State private var hoursText: String
     @State private var minutesText: String
 
-    init(request: TaskEditRequest, accent: Color, onSave: @escaping (String, Bool, TimeInterval, Bool) -> Void) {
+    init(
+        request: TaskEditRequest,
+        categories: [TaskCategory],
+        accent: Color,
+        onSave: @escaping (String, Bool, TimeInterval, Bool, UUID?) -> Void
+    ) {
         self.request = request
+        self.categories = categories
         self.accent = accent
         self.onSave = onSave
         let mins = max(0, Int(request.task.elapsedSeconds) / 60)
         _title = State(initialValue: request.task.title)
         _isCompleted = State(initialValue: request.task.isCompleted)
         _isRecurring = State(initialValue: request.task.isRecurring)
+        _categoryID = State(initialValue: request.task.categoryID)
         _totalMinutes = State(initialValue: mins)
         _hoursText = State(initialValue: "\(mins / 60)")
         _minutesText = State(initialValue: "\(mins % 60)")
@@ -975,6 +1096,23 @@ private struct TaskEditView: View {
 
             TextField("任务名称", text: $title)
                 .textFieldStyle(.roundedBorder)
+
+            if !categories.isEmpty {
+                HStack {
+                    Text("任务分类")
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Picker("", selection: $categoryID) {
+                        Text("未分类").tag(UUID?.none)
+                        ForEach(categories) { cat in
+                            Text(cat.name).tag(UUID?.some(cat.id))
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 170)
+                }
+            }
 
             HStack(spacing: 20) {
                 Toggle("已完成打卡", isOn: $isCompleted)
@@ -1015,7 +1153,7 @@ private struct TaskEditView: View {
                 Spacer()
                 Button("保存") {
                     syncFromTextFields()
-                    onSave(title, isCompleted, TimeInterval(totalMinutes * 60), isRecurring)
+                    onSave(title, isCompleted, TimeInterval(totalMinutes * 60), isRecurring, categoryID)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -1047,6 +1185,8 @@ private struct TaskEditView: View {
 
 private struct TaskRow: View {
     let task: DailyTask
+    let category: TaskCategory?
+    let allCategories: [TaskCategory]
     let elapsed: TimeInterval
     let isRunning: Bool
     let canStartTimer: Bool
@@ -1056,6 +1196,8 @@ private struct TaskRow: View {
     let onRename: (String) -> Void
     let onAdjustMinutes: (Int) -> Void
     let onToggleRecurring: () -> Void
+    let onSelectCategory: (UUID?) -> Void
+    let onApplyCategoryToAllSameName: (UUID?) -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
 
@@ -1094,13 +1236,29 @@ private struct TaskRow: View {
                         .strikethrough(task.isCompleted, color: palette.inkSecondary.opacity(0.7))
                         .lineLimit(2)
 
-                    if !task.isRecurring {
-                        Text("仅今天")
-                            .font(.system(size: 9, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.blue)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Capsule().fill(Color.blue.opacity(0.11)))
+                    if category != nil || !task.isRecurring {
+                        HStack(spacing: 4) {
+                            if let category {
+                                let catColor = CalendarTagPalette.color(named: category.colorName)
+                                HStack(spacing: 3) {
+                                    Circle().fill(catColor).frame(width: 5, height: 5)
+                                    Text(category.name)
+                                }
+                                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                                .foregroundStyle(catColor)
+                                .padding(.horizontal, 5.5)
+                                .padding(.vertical, 1.5)
+                                .background(Capsule().fill(catColor.opacity(0.12)))
+                            }
+                            if !task.isRecurring {
+                                Text("仅今天")
+                                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.blue)
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 1.5)
+                                    .background(Capsule().fill(Color.blue.opacity(0.11)))
+                            }
+                        }
                     }
                 }
                 .contentShape(Rectangle())
@@ -1189,6 +1347,29 @@ private struct TaskRow: View {
             Button("时长 +15 分钟") { onAdjustMinutes(15) }
             Button("时长 -15 分钟") { onAdjustMinutes(-15) }
             Divider()
+            if !allCategories.isEmpty {
+                Menu("设置分类") {
+                    Button {
+                        onSelectCategory(nil)
+                    } label: {
+                        Label("未分类", systemImage: category == nil ? "checkmark.circle.fill" : "circle")
+                    }
+                    Divider()
+                    ForEach(allCategories) { cat in
+                        Button {
+                            onSelectCategory(cat.id)
+                        } label: {
+                            Label(cat.name, systemImage: category?.id == cat.id ? "checkmark.circle.fill" : "circle.fill")
+                        }
+                    }
+                }
+                if let category {
+                    Button("将所有同名历史任务归入「\(category.name)」") {
+                        onApplyCategoryToAllSameName(category.id)
+                    }
+                }
+                Divider()
+            }
             Button(task.isRecurring ? "改为仅今天任务" : "改为每日固定任务", action: onToggleRecurring)
             Divider()
             Button("删除任务", role: .destructive, action: onDelete)

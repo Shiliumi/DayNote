@@ -142,12 +142,24 @@ struct StoreSmokeTest {
             let heatmap = store.heatmapStats(weeks: 12, endingAt: today, at: today)
             precondition(heatmap.count == 12 && heatmap.allSatisfy { $0.count == 7 })
 
+            // 9.6 Custom Categories, Bulk Categorize, Category Stats & Rollover Preservation
+            let catAlpha = store.addCategory(name: "核心课", colorName: "blue")!
+            let catBeta = store.addCategory(name: "练习", colorName: "green")!
+            store.applyCategoryToAllTasksNamed("任务 A-改", categoryID: catAlpha.id)
+            store.applyCategoryToAllTasksNamed("历史任务", categoryID: catBeta.id)
+            let catStats = store.categoryTimeStatsAllTime(at: today)
+            precondition(catStats.contains { $0.name == "核心课" && $0.seconds > 0 })
+            precondition(catStats.contains { $0.name == "练习" && $0.seconds >= 5_400 })
+            let catSearch = store.searchHistory(query: "核心课", at: today)
+            precondition(!catSearch.isEmpty)
+
             // 10. Full JSON backup round-trip & CSV export
             let jsonData = try! store.exportJSONData(at: today)
             let csv = store.exportCSVString(at: today)
             precondition(csv.contains("任务 A-改"))
             precondition(csv.contains("模拟考试"))
             precondition(csv.contains("数据结构"))
+            precondition(csv.contains("核心课"))
 
             let suite2 = "DayNote.StoreSmoke.Restore.\(UUID().uuidString)"
             let defaults2 = UserDefaults(suiteName: suite2)!
@@ -160,8 +172,11 @@ struct StoreSmokeTest {
             precondition(restored.note(on: history).contains("数据结构"))
             precondition(restored.taskTemplates.first?.name == "冲刺日")
             precondition(restored.pomodoroCount(on: today) == 1)
+            precondition(restored.categories.count == 2)
+            restored.deleteCategory(id: catBeta.id)
+            precondition(restored.tasks(on: history).first?.categoryID == nil)
 
-            print("Store smoke tests passed (all v3.1 checks)")
+            print("Store smoke tests passed (all v3.2 checks)")
         }
     }
 }

@@ -1,11 +1,24 @@
 import Foundation
 
+struct TaskCategory: Identifiable, Codable, Equatable {
+    let id: UUID
+    var name: String
+    var colorName: String
+
+    init(id: UUID = UUID(), name: String, colorName: String = "orange") {
+        self.id = id
+        self.name = name
+        self.colorName = colorName
+    }
+}
+
 struct DailyTask: Identifiable, Codable, Equatable {
     let id: UUID
     var title: String
     var isCompleted: Bool
     var elapsedSeconds: TimeInterval
     var isRecurring: Bool
+    var categoryID: UUID?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -13,6 +26,7 @@ struct DailyTask: Identifiable, Codable, Equatable {
         case isCompleted
         case elapsedSeconds
         case isRecurring
+        case categoryID
     }
 
     init(
@@ -20,13 +34,15 @@ struct DailyTask: Identifiable, Codable, Equatable {
         title: String,
         isCompleted: Bool = false,
         elapsedSeconds: TimeInterval = 0,
-        isRecurring: Bool = true
+        isRecurring: Bool = true,
+        categoryID: UUID? = nil
     ) {
         self.id = id
         self.title = title
         self.isCompleted = isCompleted
         self.elapsedSeconds = elapsedSeconds
         self.isRecurring = isRecurring
+        self.categoryID = categoryID
     }
 
     init(from decoder: Decoder) throws {
@@ -36,6 +52,7 @@ struct DailyTask: Identifiable, Codable, Equatable {
         isCompleted = try container.decode(Bool.self, forKey: .isCompleted)
         elapsedSeconds = try container.decode(TimeInterval.self, forKey: .elapsedSeconds)
         isRecurring = try container.decodeIfPresent(Bool.self, forKey: .isRecurring) ?? true
+        categoryID = try container.decodeIfPresent(UUID.self, forKey: .categoryID)
     }
 }
 
@@ -61,6 +78,24 @@ struct DayStats: Identifiable {
 
     var id: Date { date }
     var hasActivity: Bool { completedCount > 0 || elapsedSeconds > 0 }
+}
+
+struct TaskTimeTotal: Identifiable {
+    let title: String
+    let seconds: TimeInterval
+    let categoryID: UUID?
+
+    var id: String { "\(title)-\(categoryID?.uuidString ?? "none")" }
+}
+
+struct CategoryTimeStat: Identifiable {
+    let id: String
+    let categoryID: UUID?
+    let name: String
+    let colorName: String
+    let seconds: TimeInterval
+    let share: Double
+    let tasks: [TaskTimeTotal]
 }
 
 struct CalendarTag: Identifiable, Codable, Equatable {
@@ -93,11 +128,28 @@ struct TaskTemplateItem: Identifiable, Codable, Equatable {
     let id: UUID
     var title: String
     var isRecurring: Bool
+    var categoryID: UUID?
 
-    init(id: UUID = UUID(), title: String, isRecurring: Bool = true) {
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case isRecurring
+        case categoryID
+    }
+
+    init(id: UUID = UUID(), title: String, isRecurring: Bool = true, categoryID: UUID? = nil) {
         self.id = id
         self.title = title
         self.isRecurring = isRecurring
+        self.categoryID = categoryID
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        isRecurring = try c.decodeIfPresent(Bool.self, forKey: .isRecurring) ?? true
+        categoryID = try c.decodeIfPresent(UUID.self, forKey: .categoryID)
     }
 }
 
@@ -132,6 +184,7 @@ struct DayNoteBackup: Codable {
     var dailyNotes: [String: String]
     var taskTemplates: [TaskTemplate]
     var pomodoroCounts: [String: Int]
+    var categories: [TaskCategory]
 
     enum CodingKeys: String, CodingKey {
         case formatVersion
@@ -143,6 +196,7 @@ struct DayNoteBackup: Codable {
         case dailyNotes
         case taskTemplates
         case pomodoroCounts
+        case categories
     }
 
     init(
@@ -154,7 +208,8 @@ struct DayNoteBackup: Codable {
         countdowns: [CountdownEvent],
         dailyNotes: [String: String] = [:],
         taskTemplates: [TaskTemplate] = [],
-        pomodoroCounts: [String: Int] = [:]
+        pomodoroCounts: [String: Int] = [:],
+        categories: [TaskCategory] = []
     ) {
         self.formatVersion = formatVersion
         self.exportedAt = exportedAt
@@ -165,6 +220,7 @@ struct DayNoteBackup: Codable {
         self.dailyNotes = dailyNotes
         self.taskTemplates = taskTemplates
         self.pomodoroCounts = pomodoroCounts
+        self.categories = categories
     }
 
     init(from decoder: Decoder) throws {
@@ -178,6 +234,7 @@ struct DayNoteBackup: Codable {
         dailyNotes = try c.decodeIfPresent([String: String].self, forKey: .dailyNotes) ?? [:]
         taskTemplates = try c.decodeIfPresent([TaskTemplate].self, forKey: .taskTemplates) ?? []
         pomodoroCounts = try c.decodeIfPresent([String: Int].self, forKey: .pomodoroCounts) ?? [:]
+        categories = try c.decodeIfPresent([TaskCategory].self, forKey: .categories) ?? []
     }
 }
 

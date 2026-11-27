@@ -15,6 +15,8 @@ struct SettingsView: View {
     @State private var newCountdownColor = "orange"
     @State private var newTemplateName = ""
     @State private var newTemplateTasksText = ""
+    @State private var newCategoryName = ""
+    @State private var newCategoryColor = "blue"
 
     private let focusOptions: [(label: String, minutes: Int)] = [
         ("关闭", 0),
@@ -62,6 +64,7 @@ struct SettingsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     appearanceSection
+                    categorySection
                     generalSection
                     timerSection
                     templateSection
@@ -123,6 +126,99 @@ struct SettingsView: View {
                     .font(.system(size: 12, weight: .semibold, design: .monospaced))
                     .frame(width: 40, alignment: .trailing)
             }
+        }
+    }
+
+    // MARK: - Custom Categories
+
+    private var categorySection: some View {
+        settingsCard(title: "任务分类管理（完全自定义）", icon: "folder.badge.gearshape") {
+            if store.categories.isEmpty {
+                Text("还没有创建分类。你可以按科目、项目或生活领域自由新建分类，统计页会自动按分类汇总时长与占比。")
+                    .font(.system(size: 11, design: .rounded))
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(store.categories) { cat in
+                        HStack(spacing: 8) {
+                            categoryColorMenu(
+                                currentColor: cat.colorName,
+                                onSelect: { newColor in
+                                    store.updateCategory(id: cat.id, name: cat.name, colorName: newColor)
+                                }
+                            )
+                            TextField(
+                                "分类名称",
+                                text: Binding(
+                                    get: { cat.name },
+                                    set: { store.updateCategory(id: cat.id, name: $0, colorName: cat.colorName) }
+                                )
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .rounded))
+
+                            Button(role: .destructive) {
+                                store.deleteCategory(id: cat.id)
+                                showStatus("已删除分类「\(cat.name)」，原任务已保留为未分类")
+                            } label: {
+                                Image(systemName: "trash").font(.system(size: 11))
+                            }
+                            .buttonStyle(.borderless)
+                            .help("删除分类（不会删除任务）")
+                        }
+                    }
+                }
+            }
+
+            Divider().opacity(0.5)
+
+            HStack(spacing: 8) {
+                categoryColorMenu(currentColor: newCategoryColor) { newCategoryColor = $0 }
+                TextField("新分类名称（如：专业课 / 英语 / 科研）", text: $newCategoryName)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(createCategory)
+                Button("添加", action: createCategory)
+                    .buttonStyle(.borderedProminent)
+                    .tint(accent)
+                    .disabled(newCategoryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+    }
+
+    private func createCategory() {
+        guard let created = store.addCategory(name: newCategoryName, colorName: newCategoryColor) else { return }
+        newCategoryName = ""
+        showStatus("已添加分类「\(created.name)」")
+    }
+
+    private func categoryColorMenu(currentColor: String, onSelect: @escaping (String) -> Void) -> some View {
+        Menu {
+            ForEach(CalendarTagPalette.names, id: \.self) { name in
+                Button {
+                    onSelect(name)
+                } label: {
+                    Label(colorTitle(name), systemImage: currentColor == name ? "checkmark.circle.fill" : "circle.fill")
+                }
+            }
+        } label: {
+            Circle()
+                .fill(CalendarTagPalette.color(named: currentColor))
+                .frame(width: 18, height: 18)
+                .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+                .shadow(color: .black.opacity(0.12), radius: 1.5, y: 1)
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 26)
+    }
+
+    private func colorTitle(_ name: String) -> String {
+        switch name {
+        case "blue": return "蓝色"
+        case "green": return "绿色"
+        case "purple": return "紫色"
+        case "pink": return "粉色"
+        case "gray": return "灰色"
+        default: return "橙色"
         }
     }
 

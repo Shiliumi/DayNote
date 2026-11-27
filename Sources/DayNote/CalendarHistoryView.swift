@@ -505,9 +505,20 @@ struct CalendarHistoryView: View {
                                 Image(systemName: task.isCompleted ? "checkmark.circle.fill" : "circle")
                                     .foregroundStyle(task.isCompleted ? accent : Color.secondary)
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(task.title)
-                                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                                        .lineLimit(2)
+                                    HStack(spacing: 5) {
+                                        Text(task.title)
+                                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                                            .lineLimit(2)
+                                        if let cat = store.category(for: task.categoryID) {
+                                            let catColor = CalendarTagPalette.color(named: cat.colorName)
+                                            Text(cat.name)
+                                                .font(.system(size: 8.5, weight: .bold, design: .rounded))
+                                                .foregroundStyle(catColor)
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 1.5)
+                                                .background(Capsule().fill(catColor.opacity(0.12)))
+                                        }
+                                    }
                                     if task.elapsedSeconds > 0 {
                                         Text(ContentView.formatDuration(task.elapsedSeconds))
                                             .font(.system(size: 10, weight: .medium, design: .monospaced))
