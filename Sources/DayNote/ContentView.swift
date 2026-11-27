@@ -3,16 +3,20 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var store: TaskStore
+    @ObservedObject var controller: AppController
     @AppStorage("daynote.pin-window") private var isPinned = true
     @AppStorage("daynote.desktop-mode") private var isDesktopMode = false
     @State private var selectedDate = Date()
     @State private var observedTodayKey = TaskStore.dayKey(for: Date())
     @State private var newTaskTitle = ""
+    @State private var newTaskIsRecurring = true
     @State private var showingResetAlert = false
     @State private var showingCalendar = false
     @State private var showingStatistics = false
+    @State private var showingSettings = false
     @State private var showingGoalEditor = false
     @State private var editingRequest: TaskEditRequest?
+    @State private var draggingTaskID: UUID?
     @FocusState private var isAddingTask: Bool
 
     private let accent = Color(red: 0.96, green: 0.43, blue: 0.27)
@@ -20,14 +24,36 @@ struct ContentView: View {
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            panel(at: context.date)
-                .onChange(of: TaskStore.dayKey(for: context.date)) {
-                    handleDayChange(at: context.date)
+            Group {
+                if controller.isMiniMode {
+                    miniCapsule(at: context.date)
+                } else {
+                    panel(at: context.date)
                 }
+            }
+            .onChange(of: TaskStore.dayKey(for: context.date)) {
+                handleDayChange(at: context.date)
+            }
+            .onChange(of: Int(context.date.timeIntervalSince1970)) {
+                controller.evaluateFocusReminder(at: context.date)
+            }
         }
+        .frame(
+            minWidth: controller.isMiniMode ? 280 : 340,
+            idealWidth: controller.isMiniMode ? 330 : 370,
+            maxWidth: controller.isMiniMode ? 420 : .infinity,
+            minHeight: controller.isMiniMode ? 54 : 460,
+            idealHeight: controller.isMiniMode ? 58 : 560,
+            maxHeight: controller.isMiniMode ? 68 : .infinity
+        )
         .background(
-            WindowConfigurator(isPinned: isPinned, isDesktopMode: isDesktopMode)
-                .frame(width: 0, height: 0)
+            WindowConfigurator(
+                controller: controller,
+                isPinned: isPinned,
+                isDesktopMode: isDesktopMode,
+                isMiniMode: controller.isMiniMode
+            )
+            .frame(width: 0, height: 0)
         )
         .alert("重新开始这一天？", isPresented: $showingResetAlert) {
             Button("取消", role: .cancel) { }
@@ -37,24 +63,119 @@ struct ContentView: View {
         } message: {
             Text("所有勾选状态和计时都会清零，任务名称会保留。")
         }
+        .alert(item: $controller.sleepPrompt) { prompt in
+            Alert(
+                title: Text("检测到离开 / 休眠"),
+                message: Text("期间约 \(formatAwayDuration(prompt.awaySeconds)) 被计入了「\(prompt.taskTitle)」，需要扣除这段挂机时长吗？"),
+                primaryButton: .default(Text("扣除并暂停")) {
+                    controller.resolveSleepPrompt(deduct: true, pause: true)
+                },
+                secondaryButton: .cancel(Text("保留（一直在学）")) {
+                    controller.resolveSleepPrompt(deduct: false, pause: false)
+                }
+            )
+        }
         .sheet(isPresented: $showingCalendar) {
             CalendarHistoryView(store: store, selectedDate: $selectedDate, accent: accent)
         }
         .sheet(isPresented: $showingStatistics) {
             MonthlyStatisticsView(store: store, initialMonth: selectedDate, accent: accent)
         }
+        .sheet(isPresented: $showingSettings) {
+            SettingsView(store: store, controller: controller, accent: accent)
+        }
         .sheet(item: $editingRequest) { request in
-            TaskEditView(request: request, accent: accent) { title, completed, seconds in
+            TaskEditView(request: request, accent: accent) { title, completed, seconds, isRecurring in
                 store.updateTask(
                     id: request.task.id,
                     on: request.date,
                     title: title,
                     isCompleted: completed,
-                    elapsedSeconds: seconds
+                    elapsedSeconds: seconds,
+                    isRecurring: isRecurring
                 )
             }
         }
     }
+
+    // MARK: - Mini Floating Capsule
+
+    private func miniCapsule(at now: Date) -> some View {
+        let active = store.activeTask
+        let elapsed = active != nil ? store.activeElapsed(at: now) : store.totalElapsed(on: now, at: now)
+        let goalMin = store.goalMinutes(on: now)
+        let percent = StudyGoal.percent(elapsedSeconds: store.totalElapsed(on: now, at: now), goalMinutes: goalMin)
+
+        return HStack(spacing: 10) {
+            Circle()
+                .fill(active != nil ? accent : Color.secondary.opacity(0.4))
+                .frame(width: 8, height: 8)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(active?.title ?? "今日便笺 · 达成 \(percent)%")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color(red: 0.22, green: 0.18, blue: 0.14))
+                    .lineLimit(1)
+                if active != nil {
+                    Text("今日总计 \(Self.formatDuration(store.totalElapsed(on: now, at: now))) · \(percent)%")
+                        .font(.system(size: 9, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            Text(Self.formatDuration(elapsed))
+                .font(.system(size: 13, weight: .bold, design: .monospaced))
+                .foregroundStyle(active != nil ? accent : Color.secondary)
+                .monospacedDigit()
+
+            Button {
+                store.toggleQuickTimer(at: now)
+            } label: {
+                Image(systemName: active != nil ? "pause.fill" : "play.fill")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(active != nil ? .white : accent)
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(active != nil ? accent : accent.opacity(0.14)))
+            }
+            .buttonStyle(.plain)
+            .help(active != nil ? "暂停计时 (⌥⇧Space)" : "开始计时 (⌥⇧Space)")
+
+            Button {
+                controller.isMiniMode = false
+            } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(Color.white.opacity(0.55)))
+            }
+            .buttonStyle(.plain)
+            .help("展开完整便笺")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(red: 1.0, green: 0.98, blue: 0.91),
+                    Color(red: 1.0, green: 0.95, blue: 0.88)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
+        .clipShape(Capsule())
+        .overlay(
+            Capsule()
+                .stroke(active != nil ? accent.opacity(0.4) : Color.white.opacity(0.8), lineWidth: 1)
+        )
+        .padding(4)
+    }
+
+    // MARK: - Main Sticky Note Panel
 
     private func panel(at now: Date) -> some View {
         let dayTasks = store.tasks(on: selectedDate)
@@ -64,8 +185,16 @@ struct ContentView: View {
 
             dailyGoalBar
 
+            if let nearest = store.upcomingCountdowns(from: now).first {
+                countdownBanner(event: nearest.event, daysRemaining: nearest.daysRemaining)
+            }
+
+            if let reminder = controller.focusReminderMessage {
+                focusReminderBanner(reminder)
+            }
+
             if !calendar.isDate(selectedDate, inSameDayAs: now) {
-                historyBanner
+                historyBanner(at: now)
             }
 
             Divider().overlay(Color.black.opacity(0.06))
@@ -96,25 +225,32 @@ struct ContentView: View {
     }
 
     private func header(at now: Date) -> some View {
-        HStack(alignment: .top, spacing: 8) {
+        let isToday = calendar.isDate(selectedDate, inSameDayAs: now)
+        let isFuture = selectedDate > calendar.startOfDay(for: now) && !isToday
+
+        return HStack(alignment: .top, spacing: 5) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(calendar.isDate(selectedDate, inSameDayAs: now) ? "今日便笺" : "历史便笺")
-                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                Text(isToday ? "今日便笺" : (isFuture ? "计划便笺" : "历史便笺"))
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
                     .foregroundStyle(Color(red: 0.22, green: 0.18, blue: 0.14))
 
                 Text(selectedDate.formatted(.dateTime.year().month(.wide).day().weekday(.wide)))
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
             }
 
-            Spacer(minLength: 6)
+            Spacer(minLength: 4)
 
             headerButton("calendar", help: "日历与历史") {
                 showingCalendar = true
             }
 
-            headerButton("chart.bar.xaxis", help: "月度统计") {
+            headerButton("chart.bar.xaxis", help: "周/月统计") {
                 showingStatistics = true
+            }
+
+            headerButton("rectangle.compress.vertical", help: "迷你悬浮条") {
+                controller.isMiniMode = true
             }
 
             headerButton(isDesktopMode ? "desktopcomputer.and.macbook" : "desktopcomputer", isActive: isDesktopMode, help: isDesktopMode ? "退出桌面模式" : "固定在系统桌面") {
@@ -125,10 +261,14 @@ struct ContentView: View {
                 if isDesktopMode { isDesktopMode = false }
                 isPinned.toggle()
             }
+
+            headerButton("gearshape", help: "设置、快捷键与数据备份") {
+                showingSettings = true
+            }
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 20)
-        .padding(.bottom, 16)
+        .padding(.horizontal, 18)
+        .padding(.top, 18)
+        .padding(.bottom, 14)
     }
 
     private func headerButton(
@@ -139,16 +279,69 @@ struct ContentView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .frame(width: 26, height: 26)
+                .frame(width: 24, height: 24)
         }
         .buttonStyle(HeaderButtonStyle(isActive: isActive, accent: accent))
         .help(help)
     }
 
-    private var historyBanner: some View {
+    private func countdownBanner(event: CountdownEvent, daysRemaining: Int) -> some View {
+        let color = CalendarTagPalette.color(named: event.colorName)
+        return Button {
+            showingSettings = true
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "flag.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(color)
+                Text(event.title)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color(red: 0.25, green: 0.20, blue: 0.16))
+                    .lineLimit(1)
+                Spacer()
+                Text(daysRemaining == 0 ? "就是今天!" : "还有 \(daysRemaining) 天")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(color)
+                    .monospacedDigit()
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 7)
+            .background(color.opacity(0.08))
+        }
+        .buttonStyle(.plain)
+        .help("点击管理首页倒计时")
+    }
+
+    private func focusReminderBanner(_ message: String) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: "clock.arrow.circlepath")
-            Text("历史日期 · 可补打卡或右键编辑任务与时长")
+            Image(systemName: "bell.badge.fill")
+                .foregroundStyle(accent)
+            Text(message)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .lineLimit(2)
+            Spacer(minLength: 4)
+            Button("休息") {
+                controller.pauseForBreak()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(accent)
+            .controlSize(.mini)
+            Button("继续") {
+                controller.dismissFocusReminder()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(accent.opacity(0.12))
+    }
+
+    private func historyBanner(at now: Date) -> some View {
+        let isFuture = selectedDate > calendar.startOfDay(for: now)
+        return HStack(spacing: 8) {
+            Image(systemName: isFuture ? "calendar.badge.plus" : "clock.arrow.circlepath")
+            Text(isFuture ? "未来日期 · 可提前安排任务与目标" : "历史日期 · 可补打卡或双击/右键编辑")
                 .lineLimit(1)
             Spacer()
             Button("回到今天") {
@@ -263,6 +456,15 @@ struct ContentView: View {
                             onToggleTimer: {
                                 store.toggleTimer(for: task.id, on: selectedDate, at: now)
                             },
+                            onRename: { newTitle in
+                                store.renameTask(id: task.id, on: selectedDate, title: newTitle)
+                            },
+                            onAdjustMinutes: { minutes in
+                                store.adjustTaskDuration(id: task.id, on: selectedDate, deltaSeconds: TimeInterval(minutes * 60), at: now)
+                            },
+                            onToggleRecurring: {
+                                store.toggleRecurring(for: task.id, on: selectedDate)
+                            },
                             onEdit: {
                                 editingRequest = TaskEditRequest(task: task, date: selectedDate)
                             },
@@ -270,6 +472,22 @@ struct ContentView: View {
                                 store.deleteTask(id: task.id, on: selectedDate, at: now)
                             }
                         )
+                        .draggable(task.id.uuidString) {
+                            Text(task.title)
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.95)))
+                                .onAppear { draggingTaskID = task.id }
+                        }
+                        .dropDestination(for: String.self) { items, _ in
+                            guard let raw = items.first, let dragged = UUID(uuidString: raw) else { return false }
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                store.moveTask(draggedID: dragged, targetID: task.id, on: selectedDate)
+                            }
+                            draggingTaskID = nil
+                            return true
+                        }
                     }
                 }
                 .padding(.horizontal, 14)
@@ -281,16 +499,29 @@ struct ContentView: View {
     }
 
     private var addTaskBar: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Image(systemName: "plus.circle.fill")
                 .font(.system(size: 18))
                 .foregroundStyle(accent)
 
-            TextField(calendar.isDateInToday(selectedDate) ? "添加任务，按回车保存" : "为这一天补记任务", text: $newTaskTitle)
+            TextField(calendar.isDateInToday(selectedDate) ? "添加任务，按回车保存" : "为这一天添加任务", text: $newTaskTitle)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14, weight: .medium, design: .rounded))
                 .focused($isAddingTask)
                 .onSubmit(addTask)
+
+            Button {
+                newTaskIsRecurring.toggle()
+            } label: {
+                Text(newTaskIsRecurring ? "每日" : "仅今天")
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(newTaskIsRecurring ? accent : Color.blue)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill((newTaskIsRecurring ? accent : Color.blue).opacity(0.12)))
+            }
+            .buttonStyle(.plain)
+            .help(newTaskIsRecurring ? "每日固定任务：次日自动沿用（点击切换为仅今天）" : "仅今天临时任务：次日不会自动复制（点击切换为每日固定）")
 
             if !newTaskTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Button(action: addTask) {
@@ -301,8 +532,8 @@ struct ContentView: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 13)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .background(Color.white.opacity(0.38))
     }
 
@@ -346,7 +577,7 @@ struct ContentView: View {
     }
 
     private func addTask() {
-        store.addTask(title: newTaskTitle, on: selectedDate)
+        store.addTask(title: newTaskTitle, on: selectedDate, isRecurring: newTaskIsRecurring)
         newTaskTitle = ""
         isAddingTask = true
     }
@@ -358,6 +589,14 @@ struct ContentView: View {
         }
         observedTodayKey = newKey
         store.prepareForCurrentDay(at: now)
+    }
+
+    private func formatAwayDuration(_ seconds: TimeInterval) -> String {
+        let totalMinutes = max(1, Int((seconds / 60).rounded()))
+        let hours = totalMinutes / 60
+        let mins = totalMinutes % 60
+        if hours > 0 { return "\(hours) 小时 \(mins) 分钟" }
+        return "\(mins) 分钟"
     }
 
     static func formatDuration(_ seconds: TimeInterval) -> String {
@@ -382,26 +621,31 @@ struct TaskEditRequest: Identifiable {
 private struct TaskEditView: View {
     let request: TaskEditRequest
     let accent: Color
-    let onSave: (String, Bool, TimeInterval) -> Void
+    let onSave: (String, Bool, TimeInterval, Bool) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var title: String
     @State private var isCompleted: Bool
-    @State private var hours: Int
-    @State private var minutes: Int
+    @State private var isRecurring: Bool
+    @State private var totalMinutes: Int
+    @State private var hoursText: String
+    @State private var minutesText: String
 
-    init(request: TaskEditRequest, accent: Color, onSave: @escaping (String, Bool, TimeInterval) -> Void) {
+    init(request: TaskEditRequest, accent: Color, onSave: @escaping (String, Bool, TimeInterval, Bool) -> Void) {
         self.request = request
         self.accent = accent
         self.onSave = onSave
+        let mins = max(0, Int(request.task.elapsedSeconds) / 60)
         _title = State(initialValue: request.task.title)
         _isCompleted = State(initialValue: request.task.isCompleted)
-        _hours = State(initialValue: Int(request.task.elapsedSeconds) / 3600)
-        _minutes = State(initialValue: (Int(request.task.elapsedSeconds) % 3600) / 60)
+        _isRecurring = State(initialValue: request.task.isRecurring)
+        _totalMinutes = State(initialValue: mins)
+        _hoursText = State(initialValue: "\(mins / 60)")
+        _minutesText = State(initialValue: "\(mins % 60)")
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("编辑任务")
                     .font(.system(size: 22, weight: .bold, design: .rounded))
@@ -413,14 +657,37 @@ private struct TaskEditView: View {
             TextField("任务名称", text: $title)
                 .textFieldStyle(.roundedBorder)
 
-            Toggle("已完成打卡", isOn: $isCompleted)
+            HStack(spacing: 20) {
+                Toggle("已完成打卡", isOn: $isCompleted)
+                Toggle("每日自动沿用", isOn: $isRecurring)
+            }
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("记录时长")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                Text("记录时长（可直接输入数字或快捷微调）")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
-                Stepper("\(hours) 小时", value: $hours, in: 0...99)
-                Stepper("\(minutes) 分钟", value: $minutes, in: 0...59)
+
+                HStack(spacing: 10) {
+                    TextField("0", text: $hoursText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                        .onChange(of: hoursText) { syncFromTextFields() }
+                    Text("小时")
+                    TextField("0", text: $minutesText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                        .onChange(of: minutesText) { syncFromTextFields() }
+                    Text("分钟")
+                    Spacer()
+                }
+
+                HStack(spacing: 6) {
+                    quickButton("-15分", delta: -15)
+                    quickButton("-5分", delta: -5)
+                    quickButton("+5分", delta: 5)
+                    quickButton("+15分", delta: 15)
+                    quickButton("+30分", delta: 30)
+                }
             }
 
             HStack {
@@ -428,7 +695,8 @@ private struct TaskEditView: View {
                     .keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("保存") {
-                    onSave(title, isCompleted, TimeInterval(hours * 3600 + minutes * 60))
+                    syncFromTextFields()
+                    onSave(title, isCompleted, TimeInterval(totalMinutes * 60), isRecurring)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -438,7 +706,23 @@ private struct TaskEditView: View {
             }
         }
         .padding(24)
-        .frame(width: 360)
+        .frame(width: 390)
+    }
+
+    private func quickButton(_ label: String, delta: Int) -> some View {
+        Button(label) {
+            totalMinutes = max(0, min(99 * 60 + 59, totalMinutes + delta))
+            hoursText = "\(totalMinutes / 60)"
+            minutesText = "\(totalMinutes % 60)"
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+    }
+
+    private func syncFromTextFields() {
+        let h = max(0, min(99, Int(hoursText.filter(\.isNumber)) ?? 0))
+        let m = max(0, min(5999, Int(minutesText.filter(\.isNumber)) ?? 0))
+        totalMinutes = h * 60 + m
     }
 }
 
@@ -450,11 +734,19 @@ private struct TaskRow: View {
     let accent: Color
     let onToggleCompletion: () -> Void
     let onToggleTimer: () -> Void
+    let onRename: (String) -> Void
+    let onAdjustMinutes: (Int) -> Void
+    let onToggleRecurring: () -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
 
+    @State private var isHovering = false
+    @State private var isInlineEditing = false
+    @State private var draftTitle = ""
+    @FocusState private var inlineFocused: Bool
+
     var body: some View {
-        HStack(spacing: 11) {
+        HStack(spacing: 10) {
             Button(action: onToggleCompletion) {
                 Image(systemName: task.isCompleted ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 20, weight: .medium))
@@ -462,13 +754,56 @@ private struct TaskRow: View {
             }
             .buttonStyle(.plain)
 
-            Text(task.title)
-                .font(.system(size: 14, weight: .medium, design: .rounded))
-                .foregroundStyle(task.isCompleted ? Color.secondary : Color.primary.opacity(0.86))
-                .strikethrough(task.isCompleted, color: .secondary)
-                .lineLimit(2)
+            if isInlineEditing {
+                TextField("任务名称", text: $draftTitle)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .focused($inlineFocused)
+                    .onSubmit(commitInlineEdit)
+                    .onExitCommand { isInlineEditing = false }
+                    .onChange(of: inlineFocused) {
+                        if !inlineFocused && isInlineEditing {
+                            commitInlineEdit()
+                        }
+                    }
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(task.title)
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                        .foregroundStyle(task.isCompleted ? Color.secondary : Color.primary.opacity(0.86))
+                        .strikethrough(task.isCompleted, color: .secondary)
+                        .lineLimit(2)
 
-            Spacer(minLength: 6)
+                    if !task.isRecurring {
+                        Text("仅今天")
+                            .font(.system(size: 9, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.blue)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.blue.opacity(0.10)))
+                    }
+                }
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) {
+                    draftTitle = task.title
+                    isInlineEditing = true
+                    inlineFocused = true
+                }
+                .help("双击修改名称 · 拖拽可调整顺序")
+            }
+
+            Spacer(minLength: 4)
+
+            if isHovering && !isInlineEditing {
+                Button(action: onEdit) {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.plain)
+                .help("编辑任务与时长")
+            }
 
             Text(ContentView.formatDuration(elapsed))
                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
@@ -507,11 +842,30 @@ private struct TaskRow: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(isRunning ? accent.opacity(0.28) : Color.white.opacity(0.5), lineWidth: 1)
         )
+        .onHover { isHovering = $0 }
         .contextMenu {
             Button("编辑任务与时长", action: onEdit)
+            Button("重命名") {
+                draftTitle = task.title
+                isInlineEditing = true
+                inlineFocused = true
+            }
+            Divider()
+            Button("时长 +15 分钟") { onAdjustMinutes(15) }
+            Button("时长 -15 分钟") { onAdjustMinutes(-15) }
+            Divider()
+            Button(task.isRecurring ? "改为仅今天任务" : "改为每日固定任务", action: onToggleRecurring)
             Divider()
             Button("删除任务", role: .destructive, action: onDelete)
         }
+    }
+
+    private func commitInlineEdit() {
+        let cleaned = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleaned.isEmpty {
+            onRename(cleaned)
+        }
+        isInlineEditing = false
     }
 }
 
@@ -521,7 +875,7 @@ private struct HeaderButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 12, weight: .semibold))
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(isActive ? accent : Color.secondary)
             .background(Circle().fill(isActive ? accent.opacity(0.13) : Color.white.opacity(0.45)))
             .scaleEffect(configuration.isPressed ? 0.92 : 1)
@@ -529,8 +883,10 @@ private struct HeaderButtonStyle: ButtonStyle {
 }
 
 private struct WindowConfigurator: NSViewRepresentable {
+    let controller: AppController
     let isPinned: Bool
     let isDesktopMode: Bool
+    let isMiniMode: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -552,6 +908,7 @@ private struct WindowConfigurator: NSViewRepresentable {
 
     private func configure(_ window: NSWindow?, coordinator: Coordinator) {
         guard let window else { return }
+        controller.mainWindow = window
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
@@ -561,14 +918,13 @@ private struct WindowConfigurator: NSViewRepresentable {
         window.hidesOnDeactivate = false
         window.ignoresMouseEvents = false
         window.acceptsMouseMovedEvents = true
-        window.setFrameAutosaveName("DayNote.MainWindow")
         coordinator.startMonitoring(window: window)
+        coordinator.applyMiniMode(isMiniMode, to: window)
 
-        if isDesktopMode {
-            // Finder owns a transparent window at the desktop icon level. Placing
-            // the note below it makes the note visible while Finder consumes all
-            // mouse events. One level above the icons remains below normal app
-            // windows but lets this window receive clicks and keyboard focus.
+        if isMiniMode {
+            window.level = .floating
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        } else if isDesktopMode {
             let desktopLevel = Int(CGWindowLevelForKey(.desktopIconWindow)) + 1
             window.level = NSWindow.Level(rawValue: desktopLevel)
             window.collectionBehavior = [.canJoinAllSpaces, .stationary]
@@ -581,15 +937,46 @@ private struct WindowConfigurator: NSViewRepresentable {
     @MainActor
     final class Coordinator {
         private var mouseMonitor: Any?
+        private var lastMiniMode: Bool?
+        private var savedNormalFrame: NSRect?
+
+        func applyMiniMode(_ isMini: Bool, to window: NSWindow) {
+            if lastMiniMode == nil {
+                window.setFrameAutosaveName("DayNote.MainWindow")
+                lastMiniMode = isMini
+                if isMini {
+                    savedNormalFrame = NSRect(x: window.frame.origin.x, y: window.frame.origin.y, width: 370, height: 560)
+                    let topY = window.frame.maxY
+                    window.setFrame(NSRect(x: window.frame.origin.x, y: topY - 60, width: 330, height: 60), display: true, animate: false)
+                }
+                return
+            }
+            guard lastMiniMode != isMini else { return }
+            lastMiniMode = isMini
+
+            if isMini {
+                savedNormalFrame = window.frame
+                let topY = window.frame.maxY
+                let miniFrame = NSRect(x: window.frame.origin.x, y: topY - 60, width: 330, height: 60)
+                window.setFrame(miniFrame, display: true, animate: true)
+            } else {
+                let targetSize = savedNormalFrame?.size ?? NSSize(width: 370, height: 560)
+                let topY = window.frame.maxY
+                let normalFrame = NSRect(
+                    x: window.frame.origin.x,
+                    y: max(40, topY - targetSize.height),
+                    width: max(340, targetSize.width),
+                    height: max(460, targetSize.height)
+                )
+                window.setFrame(normalFrame, display: true, animate: true)
+            }
+        }
 
         func startMonitoring(window: NSWindow) {
             guard mouseMonitor == nil else { return }
             mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak window] event in
                 guard let window, event.window === window else { return event }
 
-                // Desktop-level windows can receive the event while the app is
-                // inactive. Activate and key the window before AppKit dispatches
-                // the same event so buttons and text fields work on first click.
                 if window.level.rawValue < NSWindow.Level.normal.rawValue {
                     NSApp.activate(ignoringOtherApps: true)
                     window.makeKey()

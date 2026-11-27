@@ -10,6 +10,8 @@ struct CalendarHistoryView: View {
     @State private var calendarSelection: Date
     @State private var showingTagEditor = false
     @State private var showingDayGoalEditor = false
+    @State private var showingCountdownPopover = false
+    @State private var countdownTitleDraft = ""
 
     private let calendar = Calendar.autoupdatingCurrent
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 5), count: 7)
@@ -29,7 +31,7 @@ struct CalendarHistoryView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("中国日历与历史")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
-                    Text("农历 · 法定节假日 · 学习记录 · 自定义标签")
+                    Text("农历 · 2024–2027 法定节假日 · 未来规划 · 标签与倒计时")
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
@@ -79,8 +81,19 @@ struct CalendarHistoryView: View {
             Spacer()
 
             VStack(spacing: 2) {
-                Text(visibleMonth.formatted(.dateTime.year().month(.wide)))
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                HStack(spacing: 8) {
+                    Text(visibleMonth.formatted(.dateTime.year().month(.wide)))
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                    if !isShowingCurrentMonth {
+                        Button("回到今天") {
+                            let today = Date()
+                            calendarSelection = today
+                            visibleMonth = calendar.dateInterval(of: .month, for: today)?.start ?? today
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                    }
+                }
                 if !ChinaCalendar.hasOfficialSchedule(for: calendar.component(.year, from: visibleMonth)) {
                     Text("该年度暂无官方放假安排")
                         .font(.system(size: 9, weight: .medium, design: .rounded))
@@ -92,7 +105,6 @@ struct CalendarHistoryView: View {
 
             Button { changeMonth(by: 1) } label: { Image(systemName: "chevron.right") }
                 .buttonStyle(.borderless)
-                .disabled(isShowingCurrentMonth)
         }
     }
 
@@ -122,13 +134,15 @@ struct CalendarHistoryView: View {
     private func dayCell(_ date: Date) -> some View {
         let isSelected = calendar.isDate(date, inSameDayAs: calendarSelection)
         let isToday = calendar.isDateInToday(date)
-        let isFuture = date > calendar.startOfDay(for: Date())
+        let isFuture = calendar.startOfDay(for: date) > calendar.startOfDay(for: Date())
         let taskCount = store.tasks(on: date).count
         let hasActivity = store.hasActivity(on: date)
         let achievement = StudyGoal.percent(elapsedSeconds: store.totalElapsed(on: date), goalMinutes: store.goalMinutes(on: date))
         let holiday = ChinaCalendar.officialHoliday(for: date)
         let festival = ChinaCalendar.traditionalFestival(for: date)
         let tags = store.tags(on: date)
+        let dayKey = TaskStore.dayKey(for: date)
+        let hasCountdown = store.countdowns.contains { $0.targetDayKey == dayKey }
         let lunar = festival ?? ChinaCalendar.lunarText(for: date)
 
         return Button {
@@ -138,6 +152,11 @@ struct CalendarHistoryView: View {
                 HStack(spacing: 2) {
                     Text("\(calendar.component(.day, from: date))")
                         .font(.system(size: 13, weight: isToday ? .bold : .medium, design: .rounded))
+                    if hasCountdown {
+                        Image(systemName: "flag.fill")
+                            .font(.system(size: 7))
+                            .foregroundStyle(isSelected ? .white : accent)
+                    }
                     Spacer(minLength: 0)
                     if let holiday {
                         Text(holiday.badge)
@@ -157,7 +176,7 @@ struct CalendarHistoryView: View {
                     if hasActivity {
                         Circle().fill(isSelected ? Color.white : accent).frame(width: 5, height: 5)
                     }
-                    if taskCount > 0 {
+                    if taskCount > 0 && !isFuture {
                         Text("\(achievement)%")
                             .font(.system(size: 8, weight: .semibold, design: .rounded))
                     }
@@ -171,7 +190,7 @@ struct CalendarHistoryView: View {
                 .frame(height: 9)
             }
             .padding(.horizontal, 5)
-            .foregroundStyle(isSelected ? Color.white : (isFuture ? Color.secondary.opacity(0.42) : Color.primary))
+            .foregroundStyle(isSelected ? Color.white : (isFuture ? Color.primary.opacity(0.68) : Color.primary))
             .frame(maxWidth: .infinity, minHeight: 56)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -179,15 +198,21 @@ struct CalendarHistoryView: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(isToday && !isSelected ? accent.opacity(0.45) : Color.clear, lineWidth: 1)
+                    .stroke(isToday && !isSelected ? accent.opacity(0.45) : (hasCountdown && !isSelected ? accent.opacity(0.28) : Color.clear), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
-        .disabled(isFuture)
         .contextMenu {
             Button("编辑这一天的标签") {
                 calendarSelection = date
                 showingTagEditor = true
+            }
+            if !isFuture || isFuture {
+                Button("设为首页倒计时") {
+                    calendarSelection = date
+                    countdownTitleDraft = store.tags(on: date).first?.title ?? ""
+                    showingCountdownPopover = true
+                }
             }
         }
     }
@@ -205,8 +230,8 @@ struct CalendarHistoryView: View {
                 Text("学习记录")
             }
             HStack(spacing: 4) {
-                Circle().fill(.purple).frame(width: 6, height: 6)
-                Text("自定义标签")
+                Image(systemName: "flag.fill").font(.system(size: 7)).foregroundStyle(accent)
+                Text("倒计时")
             }
             Spacer()
         }
@@ -223,11 +248,19 @@ struct CalendarHistoryView: View {
         let holiday = ChinaCalendar.officialHoliday(for: calendarSelection)
         let festival = ChinaCalendar.traditionalFestival(for: calendarSelection)
         let tags = store.tags(on: calendarSelection)
+        let isFuture = calendar.startOfDay(for: calendarSelection) > calendar.startOfDay(for: Date())
+        let dayKey = TaskStore.dayKey(for: calendarSelection)
+        let dayCountdowns = store.countdowns.filter { $0.targetDayKey == dayKey }
 
         return VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(calendarSelection.formatted(.dateTime.month(.wide).day()))
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                HStack(spacing: 6) {
+                    Text(calendarSelection.formatted(.dateTime.month(.wide).day()))
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                    if isFuture {
+                        badge("未来日期", color: .blue)
+                    }
+                }
                 HStack(spacing: 7) {
                     Text(calendarSelection.formatted(.dateTime.weekday(.wide)))
                     Text(ChinaCalendar.lunarDetail(for: calendarSelection))
@@ -274,8 +307,51 @@ struct CalendarHistoryView: View {
                 )
             }
             .help("调整这一天的学习目标")
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .foregroundStyle(.secondary)
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .foregroundStyle(.secondary)
+
+            if calendar.startOfDay(for: calendarSelection) >= calendar.startOfDay(for: Date()) {
+                HStack(spacing: 6) {
+                    Button {
+                        countdownTitleDraft = tags.first?.title ?? ""
+                        showingCountdownPopover = true
+                    } label: {
+                        Label(dayCountdowns.isEmpty ? "设为首页倒计时" : "添加倒计时", systemImage: "flag.badge.ellipsis")
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .popover(isPresented: $showingCountdownPopover, arrowEdge: .trailing) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("添加首页倒计时")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                            TextField("例如：考研初试", text: $countdownTitleDraft)
+                                .textFieldStyle(.roundedBorder)
+                            HStack {
+                                Button("取消") { showingCountdownPopover = false }
+                                Spacer()
+                                Button("添加") {
+                                    store.addCountdown(title: countdownTitleDraft, targetDate: calendarSelection)
+                                    showingCountdownPopover = false
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(accent)
+                                .disabled(countdownTitleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            }
+                        }
+                        .padding(14)
+                        .frame(width: 240)
+                    }
+                }
+            }
+
+            if !dayCountdowns.isEmpty {
+                FlowLayout(spacing: 5) {
+                    ForEach(dayCountdowns) { event in
+                        badge("🎯 \(event.title)", color: accent)
+                    }
+                }
+            }
 
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
@@ -307,7 +383,7 @@ struct CalendarHistoryView: View {
             Divider()
 
             if tasks.isEmpty {
-                Text("这一天没有任务记录")
+                Text(isFuture ? "可以打开这一天提前规划任务" : "这一天没有任务记录")
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundStyle(.tertiary)
                 Spacer()

@@ -8,21 +8,37 @@ final class TaskStore: ObservableObject {
     @Published private(set) var timerStartedAt: Date?
     @Published private(set) var calendarTags: [String: [CalendarTag]] = [:]
     @Published private(set) var dailyGoals: [String: Int] = [:]
+    @Published private(set) var countdowns: [CountdownEvent] = []
+    @Published var autoBackupDirectoryPath: String = "" {
+        didSet {
+            defaults.set(autoBackupDirectoryPath, forKey: autoBackupDirKey)
+            if !autoBackupDirectoryPath.isEmpty {
+                performAutoBackupIfConfigured()
+            }
+        }
+    }
 
     private let archiveKey = "daynote.saved-archive.v2"
     private let legacyKey = "daynote.saved-note.v1"
     private let calendarTagsKey = "daynote.calendar-tags.v1"
     private let dailyGoalsKey = "daynote.daily-goals.v1"
+    private let countdownsKey = "daynote.countdowns.v1"
+    private let autoBackupDirKey = "daynote.auto-backup-dir"
     private let calendar = Calendar.autoupdatingCurrent
     private let defaults: UserDefaults
+    private var lastAutoBackupAt: Date?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        self.autoBackupDirectoryPath = defaults.string(forKey: autoBackupDirKey) ?? ""
         load()
         loadCalendarTags()
         loadDailyGoals()
+        loadCountdowns()
         prepareForCurrentDay(at: Date())
     }
+
+    // MARK: - Queries
 
     func tasks(on date: Date) -> [DailyTask] {
         days[Self.dayKey(for: date)] ?? []
@@ -43,6 +59,29 @@ final class TaskStore: ObservableObject {
         let legacyGoal = defaults.integer(forKey: StudyGoal.defaultsKey)
         return legacyGoal > 0 ? legacyGoal : StudyGoal.defaultMinutes
     }
+
+    var activeTask: DailyTask? {
+        guard let activeDayKey, let activeTaskID else { return nil }
+        return days[activeDayKey]?.first(where: { $0.id == activeTaskID })
+    }
+
+    var isTimerRunning: Bool {
+        activeDayKey != nil && activeTaskID != nil && timerStartedAt != nil
+    }
+
+    func activeElapsed(at now: Date = Date()) -> TimeInterval {
+        guard let activeDayKey, let task = activeTask, let date = Self.date(fromDayKey: activeDayKey) else {
+            return 0
+        }
+        return elapsed(for: task, on: date, at: now)
+    }
+
+    func currentSegmentElapsed(at now: Date = Date()) -> TimeInterval {
+        guard let timerStartedAt else { return 0 }
+        return max(0, now.timeIntervalSince(timerStartedAt))
+    }
+
+    // MARK: - Goals & Tags
 
     func setGoalMinutes(_ minutes: Int, on date: Date) {
         dailyGoals[Self.dayKey(for: date)] = min(24 * 60, max(30, minutes))
@@ -97,15 +136,102 @@ final class TaskStore: ObservableObject {
         saveCalendarTags()
     }
 
-    func addTask(title: String, on date: Date) {
+    // MARK: - Countdowns
+
+    func addCountdown(title: String, targetDate: Date, colorName: String = "orange") {
+        let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+        let key = Self.dayKey(for: targetDate)
+        countdowns.append(CountdownEvent(title: cleaned, targetDayKey: key, colorName: colorName))
+        sortCountdowns()
+        saveCountdowns()
+    }
+
+    func deleteCountdown(id: UUID) {
+        countdowns.removeAll { $0.id == id }
+        saveCountdowns()
+    }
+
+    func daysRemaining(for event: CountdownEvent, from now: Date = Date()) -> Int? {
+        guard let target = Self.date(fromDayKey: event.targetDayKey) else { return nil }
+        let startToday = calendar.startOfDay(for: now)
+        let startTarget = calendar.startOfDay(for: target)
+        return calendar.dateComponents([.day], from: startToday, to: startTarget).day
+    }
+
+    func upcomingCountdowns(from now: Date = Date()) -> [(event: CountdownEvent, daysRemaining: Int)] {
+        countdowns.compactMap { event in
+            guard let remaining = daysRemaining(for: event, from: now), remaining >= 0 else { return nil }
+            return (event, remaining)
+        }
+        .sorted { $0.daysRemaining < $1.daysRemaining }
+    }
+
+    private func sortCountdowns() {
+        countdowns.sort { $0.targetDayKey < $1.targetDayKey }
+    }
+
+    // MARK: - Tasks & Timer
+
+    func addTask(title: String, on date: Date, isRecurring: Bool = true) {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return }
         prepareForCurrentDay(at: Date())
 
         let key = Self.dayKey(for: date)
         var dayTasks = days[key] ?? []
-        dayTasks.append(DailyTask(title: cleaned))
+        dayTasks.append(DailyTask(title: cleaned, isRecurring: isRecurring))
         days[key] = dayTasks
+        save()
+    }
+
+    func renameTask(id: UUID, on date: Date, title: String) {
+        let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return }
+        let key = Self.dayKey(for: date)
+        guard var dayTasks = days[key], let index = dayTasks.firstIndex(where: { $0.id == id }) else { return }
+        dayTasks[index].title = cleaned
+        days[key] = dayTasks
+        save()
+    }
+
+    func toggleRecurring(for id: UUID, on date: Date) {
+        let key = Self.dayKey(for: date)
+        guard var dayTasks = days[key], let index = dayTasks.firstIndex(where: { $0.id == id }) else { return }
+        dayTasks[index].isRecurring.toggle()
+        days[key] = dayTasks
+        save()
+    }
+
+    func moveTask(draggedID: UUID, targetID: UUID, on date: Date) {
+        guard draggedID != targetID else { return }
+        let key = Self.dayKey(for: date)
+        guard
+            var dayTasks = days[key],
+            let fromIndex = dayTasks.firstIndex(where: { $0.id == draggedID }),
+            let toIndex = dayTasks.firstIndex(where: { $0.id == targetID })
+        else { return }
+        let item = dayTasks.remove(at: fromIndex)
+        dayTasks.insert(item, at: toIndex)
+        days[key] = dayTasks
+        save()
+    }
+
+    func adjustTaskDuration(id: UUID, on date: Date, deltaSeconds: TimeInterval, at now: Date = Date()) {
+        prepareForCurrentDay(at: now)
+        let key = Self.dayKey(for: date)
+        let wasRunning = (activeDayKey == key && activeTaskID == id)
+        if wasRunning {
+            stopActiveTimer(at: now)
+        }
+        guard var dayTasks = days[key], let index = dayTasks.firstIndex(where: { $0.id == id }) else { return }
+        dayTasks[index].elapsedSeconds = max(0, dayTasks[index].elapsedSeconds + deltaSeconds)
+        days[key] = dayTasks
+        if wasRunning, !dayTasks[index].isCompleted {
+            activeDayKey = key
+            activeTaskID = id
+            timerStartedAt = now
+        }
         save()
     }
 
@@ -115,6 +241,7 @@ final class TaskStore: ObservableObject {
         title: String,
         isCompleted: Bool,
         elapsedSeconds: TimeInterval,
+        isRecurring: Bool? = nil,
         at now: Date = Date()
     ) {
         let cleaned = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -129,6 +256,9 @@ final class TaskStore: ObservableObject {
         dayTasks[index].title = cleaned
         dayTasks[index].isCompleted = isCompleted
         dayTasks[index].elapsedSeconds = max(0, elapsedSeconds)
+        if let isRecurring {
+            dayTasks[index].isRecurring = isRecurring
+        }
         days[key] = dayTasks
         save()
     }
@@ -165,6 +295,39 @@ final class TaskStore: ObservableObject {
         save()
     }
 
+    func pauseActiveTimer(at now: Date = Date()) {
+        stopActiveTimer(at: now)
+    }
+
+    func toggleQuickTimer(at now: Date = Date()) {
+        prepareForCurrentDay(at: now)
+        if isTimerRunning {
+            stopActiveTimer(at: now)
+            return
+        }
+        let todayTasks = tasks(on: now)
+        if let candidate = todayTasks.first(where: { !$0.isCompleted }) {
+            toggleTimer(for: candidate.id, on: now, at: now)
+        }
+    }
+
+    func deductAwayTime(taskID: UUID, dayKey: String, seconds: TimeInterval, pauseTimer: Bool, at now: Date = Date()) {
+        let deduction = max(0, seconds)
+        let wasRunningThis = (activeDayKey == dayKey && activeTaskID == taskID)
+        if wasRunningThis {
+            stopActiveTimer(at: now)
+        }
+        guard var dayTasks = days[dayKey], let index = dayTasks.firstIndex(where: { $0.id == taskID }) else { return }
+        dayTasks[index].elapsedSeconds = max(0, dayTasks[index].elapsedSeconds - deduction)
+        days[dayKey] = dayTasks
+        if wasRunningThis && !pauseTimer && !dayTasks[index].isCompleted && dayKey == Self.dayKey(for: now) {
+            activeDayKey = dayKey
+            activeTaskID = taskID
+            timerStartedAt = now
+        }
+        save()
+    }
+
     func deleteTask(id: UUID, on date: Date, at now: Date = Date()) {
         prepareForCurrentDay(at: now)
         let key = Self.dayKey(for: date)
@@ -184,8 +347,8 @@ final class TaskStore: ObservableObject {
             activeTaskID = nil
             timerStartedAt = nil
         }
-        let titles = (days[key] ?? []).map(\.title)
-        days[key] = titles.map { DailyTask(title: $0) }
+        let existing = days[key] ?? []
+        days[key] = existing.map { DailyTask(title: $0.title, isRecurring: $0.isRecurring) }
         save()
     }
 
@@ -197,10 +360,12 @@ final class TaskStore: ObservableObject {
         }
 
         guard days[todayKey] == nil else { return }
-        let template = mostRecentTasks(before: date)
-        days[todayKey] = template.map { DailyTask(title: $0.title) }
+        let template = mostRecentTasks(before: date).filter(\.isRecurring)
+        days[todayKey] = template.map { DailyTask(title: $0.title, isRecurring: true) }
         save()
     }
+
+    // MARK: - Analytics & Stats
 
     func elapsed(for task: DailyTask, on date: Date, at now: Date) -> TimeInterval {
         let key = Self.dayKey(for: date)
@@ -240,22 +405,180 @@ final class TaskStore: ObservableObject {
         }
     }
 
+    func weeklyStats(containing referenceDate: Date, at now: Date = Date()) -> [DayStats] {
+        var mondayCal = calendar
+        mondayCal.firstWeekday = 2
+        guard let interval = mondayCal.dateInterval(of: .weekOfYear, for: referenceDate) else { return [] }
+        return (0..<7).compactMap { offset -> DayStats? in
+            guard let date = mondayCal.date(byAdding: .day, value: offset, to: interval.start) else { return nil }
+            let dayTasks = tasks(on: date)
+            return DayStats(
+                date: date,
+                taskCount: dayTasks.count,
+                completedCount: dayTasks.lazy.filter(\.isCompleted).count,
+                elapsedSeconds: totalElapsed(on: date, at: now)
+            )
+        }
+    }
+
     func taskTimeTotals(inMonthContaining month: Date, at now: Date = Date()) -> [(title: String, seconds: TimeInterval)] {
         guard let interval = calendar.dateInterval(of: .month, for: month) else { return [] }
-        var totals: [String: TimeInterval] = [:]
+        return taskTimeTotals(in: interval, at: now)
+    }
 
+    func taskTimeTotals(inWeekContaining referenceDate: Date, at now: Date = Date()) -> [(title: String, seconds: TimeInterval)] {
+        var mondayCal = calendar
+        mondayCal.firstWeekday = 2
+        guard let interval = mondayCal.dateInterval(of: .weekOfYear, for: referenceDate) else { return [] }
+        return taskTimeTotals(in: interval, at: now)
+    }
+
+    private func taskTimeTotals(in interval: DateInterval, at now: Date) -> [(title: String, seconds: TimeInterval)] {
+        var totals: [String: TimeInterval] = [:]
         for (key, dayTasks) in days {
             guard let date = Self.date(fromDayKey: key), interval.contains(date) else { continue }
             for task in dayTasks {
                 totals[task.title, default: 0] += elapsed(for: task, on: date, at: now)
             }
         }
-
         return totals
             .map { (title: $0.key, seconds: $0.value) }
             .filter { $0.seconds > 0 }
             .sorted { $0.seconds > $1.seconds }
     }
+
+    func currentStreak(at now: Date = Date()) -> Int {
+        var cursor = calendar.startOfDay(for: now)
+        if !hasActivity(on: cursor, at: now) {
+            guard let yesterday = calendar.date(byAdding: .day, value: -1, to: cursor) else { return 0 }
+            cursor = yesterday
+        }
+        var streak = 0
+        while hasActivity(on: cursor, at: now) {
+            streak += 1
+            guard let prev = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
+            cursor = prev
+        }
+        return streak
+    }
+
+    func bestStreak(at now: Date = Date()) -> Int {
+        let activeDates = days.keys
+            .compactMap { Self.date(fromDayKey: $0) }
+            .filter { hasActivity(on: $0, at: now) }
+            .map { calendar.startOfDay(for: $0) }
+            .sorted()
+        guard !activeDates.isEmpty else { return 0 }
+        var best = 1
+        var current = 1
+        for i in 1..<activeDates.count {
+            let diff = calendar.dateComponents([.day], from: activeDates[i - 1], to: activeDates[i]).day ?? 0
+            if diff == 1 {
+                current += 1
+                best = max(best, current)
+            } else if diff > 1 {
+                current = 1
+            }
+        }
+        return best
+    }
+
+    // MARK: - Backup & Export / Import
+
+    func makeBackup(at now: Date = Date()) -> DayNoteBackup {
+        let archive = StoredArchive(
+            days: days,
+            activeDayKey: activeDayKey,
+            activeTaskID: activeTaskID,
+            timerStartedAt: timerStartedAt
+        )
+        return DayNoteBackup(
+            formatVersion: 3,
+            exportedAt: now,
+            archive: archive,
+            calendarTags: calendarTags,
+            dailyGoals: dailyGoals,
+            countdowns: countdowns
+        )
+    }
+
+    func exportJSONData(at now: Date = Date()) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(makeBackup(at: now))
+    }
+
+    func importBackup(from data: Data) throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let backup: DayNoteBackup
+        if let decoded = try? decoder.decode(DayNoteBackup.self, from: data) {
+            backup = decoded
+        } else {
+            let fallbackDecoder = JSONDecoder()
+            backup = try fallbackDecoder.decode(DayNoteBackup.self, from: data)
+        }
+        days = backup.archive.days
+        activeDayKey = backup.archive.activeDayKey
+        activeTaskID = backup.archive.activeTaskID
+        timerStartedAt = backup.archive.timerStartedAt
+        calendarTags = backup.calendarTags
+        dailyGoals = backup.dailyGoals
+        countdowns = backup.countdowns
+        sortCountdowns()
+        validateActiveTimer()
+        save()
+        saveCalendarTags()
+        saveDailyGoals()
+        saveCountdowns()
+    }
+
+    func exportCSVString(at now: Date = Date()) -> String {
+        var lines: [String] = ["\u{FEFF}日期,当天目标(分钟),当天总时长(分钟),达成率(%),任务名称,已完成,任务时长(分钟),每日重复,标签"]
+        let allKeys = Set(days.keys).union(calendarTags.keys).sorted()
+        for key in allKeys {
+            guard let date = Self.date(fromDayKey: key) else { continue }
+            let dayTasks = days[key] ?? []
+            let goalMin = goalMinutes(on: date)
+            let totalSec = totalElapsed(on: date, at: now)
+            let totalMin = String(format: "%.1f", totalSec / 60.0)
+            let pct = StudyGoal.percent(elapsedSeconds: totalSec, goalMinutes: goalMin)
+            let tagText = (calendarTags[key] ?? []).map(\.title).joined(separator: " / ")
+            if dayTasks.isEmpty {
+                lines.append("\(key),\(goalMin),\(totalMin),\(pct)%,\"\",否,0.0,否,\"\(csvEscape(tagText))\"")
+            } else {
+                for task in dayTasks {
+                    let taskMin = String(format: "%.1f", elapsed(for: task, on: date, at: now) / 60.0)
+                    let done = task.isCompleted ? "是" : "否"
+                    let rec = task.isRecurring ? "是" : "否"
+                    lines.append("\(key),\(goalMin),\(totalMin),\(pct)%,\"\(csvEscape(task.title))\",\(done),\(taskMin),\(rec),\"\(csvEscape(tagText))\"")
+                }
+            }
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    func performAutoBackupIfConfigured(force: Bool = false) {
+        let dirPath = autoBackupDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !dirPath.isEmpty else { return }
+        let now = Date()
+        if !force, let last = lastAutoBackupAt, now.timeIntervalSince(last) < 10 {
+            return
+        }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: dirPath, isDirectory: &isDir), isDir.boolValue else { return }
+        guard let data = try? exportJSONData(at: now) else { return }
+        let targetURL = URL(fileURLWithPath: dirPath).appendingPathComponent("DayNote-AutoBackup.json")
+        try? data.write(to: targetURL, options: .atomic)
+        lastAutoBackupAt = now
+    }
+
+    private func csvEscape(_ text: String) -> String {
+        text.replacingOccurrences(of: "\"", with: "\"\"")
+    }
+
+    // MARK: - Internal Timer & Persistence
 
     private func stopActiveTimer(at date: Date) {
         guard
@@ -356,14 +679,31 @@ final class TaskStore: ObservableObject {
         dailyGoals = goals
     }
 
+    private func loadCountdowns() {
+        guard
+            let data = defaults.data(forKey: countdownsKey),
+            let items = try? JSONDecoder().decode([CountdownEvent].self, from: data)
+        else { return }
+        countdowns = items
+        sortCountdowns()
+    }
+
     private func saveDailyGoals() {
         guard let data = try? JSONEncoder().encode(dailyGoals) else { return }
         defaults.set(data, forKey: dailyGoalsKey)
+        performAutoBackupIfConfigured()
     }
 
     private func saveCalendarTags() {
         guard let data = try? JSONEncoder().encode(calendarTags) else { return }
         defaults.set(data, forKey: calendarTagsKey)
+        performAutoBackupIfConfigured()
+    }
+
+    private func saveCountdowns() {
+        guard let data = try? JSONEncoder().encode(countdowns) else { return }
+        defaults.set(data, forKey: countdownsKey)
+        performAutoBackupIfConfigured()
     }
 
     private func validateActiveTimer() {
@@ -389,6 +729,7 @@ final class TaskStore: ObservableObject {
         )
         guard let data = try? JSONEncoder().encode(archive) else { return }
         defaults.set(data, forKey: archiveKey)
+        performAutoBackupIfConfigured()
     }
 
     static func dayKey(for date: Date) -> String {

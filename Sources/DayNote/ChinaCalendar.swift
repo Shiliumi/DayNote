@@ -73,7 +73,7 @@ enum ChinaCalendar {
     }
 
     static func hasOfficialSchedule(for year: Int) -> Bool {
-        [2024, 2025, 2026].contains(year)
+        [2024, 2025, 2026, 2027].contains(year)
     }
 
     private static func dayKey(_ date: Date) -> String {
@@ -138,6 +138,18 @@ enum ChinaCalendar {
         addRange("2026-09-25", "2026-09-27", "中秋节")
         addRange("2026-10-01", "2026-10-07", "国庆节")
         add(["2026-09-20", "2026-10-10"], "国庆调休", .adjustedWorkday)
+
+        // 国务院办公厅 2027 年部分节假日安排（国办发明电〔2026〕10号）
+        addRange("2027-01-01", "2027-01-03", "元旦")
+        addRange("2027-02-05", "2027-02-13", "春节")
+        add(["2027-01-31", "2027-02-14"], "春节调休", .adjustedWorkday)
+        addRange("2027-04-03", "2027-04-05", "清明节")
+        addRange("2027-05-01", "2027-05-05", "劳动节")
+        add(["2027-05-08"], "劳动节调休", .adjustedWorkday)
+        add(["2027-06-09"], "端午节")
+        add(["2027-09-15"], "中秋节")
+        addRange("2027-10-01", "2027-10-07", "国庆节")
+        add(["2027-09-26", "2027-10-09"], "国庆调休", .adjustedWorkday)
 
         return result
     }()
