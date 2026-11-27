@@ -8,6 +8,8 @@
     <string>今日便笺</string>
     <key>CFBundleExecutable</key>
     <string>DayNote</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>local.daynote.desktop</string>
     <key>CFBundleInfoDictionaryVersion</key>
