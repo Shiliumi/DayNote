@@ -28,7 +28,7 @@ struct ContentView: View {
     private var palette: DayNotePalette { controller.palette }
 
     var body: some View {
-        let now = clock.now
+        let now = store.isTimerRunning ? clock.now : Date()
 
         Group {
             if controller.isMiniMode {
@@ -164,7 +164,7 @@ struct ContentView: View {
                 .monospacedDigit()
 
             Button {
-                store.toggleQuickTimer(at: now)
+                store.toggleQuickTimer(at: Date())
                 controller.updateStatusBarTitle()
             } label: {
                 Image(systemName: active != nil ? "pause.fill" : "play.fill")
@@ -830,16 +830,16 @@ struct ContentView: View {
                             canStartTimer: calendar.isDate(selectedDate, inSameDayAs: now),
                             palette: palette,
                             onToggleCompletion: {
-                                store.toggleCompletion(for: task.id, on: selectedDate, at: now)
+                                store.toggleCompletion(for: task.id, on: selectedDate, at: Date())
                             },
                             onToggleTimer: {
-                                store.toggleTimer(for: task.id, on: selectedDate, at: now)
+                                store.toggleTimer(for: task.id, on: selectedDate, at: Date())
                             },
                             onRename: { newTitle in
                                 store.renameTask(id: task.id, on: selectedDate, title: newTitle)
                             },
                             onAdjustMinutes: { minutes in
-                                store.adjustTaskDuration(id: task.id, on: selectedDate, deltaSeconds: TimeInterval(minutes * 60), at: now)
+                                store.adjustTaskDuration(id: task.id, on: selectedDate, deltaSeconds: TimeInterval(minutes * 60), at: Date())
                             },
                             onToggleRecurring: {
                                 store.toggleRecurring(for: task.id, on: selectedDate)
@@ -854,7 +854,7 @@ struct ContentView: View {
                                 editingRequest = TaskEditRequest(task: task, date: selectedDate)
                             },
                             onDelete: {
-                                store.deleteTask(id: task.id, on: selectedDate, at: now)
+                                store.deleteTask(id: task.id, on: selectedDate, at: Date())
                             }
                         )
                         .draggable(task.id.uuidString) {

@@ -168,9 +168,34 @@ final class AppController: NSObject, ObservableObject, NSPopoverDelegate {
         hasStarted = true
         setupStatusBarItem()
         installSleepObservers()
+        installAppActiveObserver()
         updateHotkeys()
         syncTimersWithRunningState()
         startDayRolloverTimer()
+    }
+
+    private func installAppActiveObserver() {
+        let obs = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshClockAndDayState()
+            }
+        }
+        workspaceObservers.append(obs)
+    }
+
+    func refreshClockAndDayState() {
+        let now = Date()
+        clock.now = now
+        let currentKey = TaskStore.dayKey(for: now)
+        if currentKey != lastObservedDayKey {
+            lastObservedDayKey = currentKey
+            store?.prepareForCurrentDay(at: now)
+        }
+        updateStatusBarTitle(at: now)
     }
 
     // MARK: - Smart Low-Power Ticker (0 Hz when idle, 1 Hz only while timing)
@@ -336,6 +361,7 @@ final class AppController: NSObject, ObservableObject, NSPopoverDelegate {
         if popover.isShown {
             popover.performClose(sender)
         } else {
+            refreshClockAndDayState()
             popover.contentViewController = NSHostingController(
                 rootView: MenuBarContentView(store: store, controller: self, clock: clock)
             )
@@ -359,6 +385,7 @@ final class AppController: NSObject, ObservableObject, NSPopoverDelegate {
 
     func showMainWindow() {
         closeStatusPopover()
+        refreshClockAndDayState()
         NSApp.activate(ignoringOtherApps: true)
         if let window = mainWindow ?? NSApp.windows.first(where: { $0.canBecomeMain && !($0 is NSPanel) }) {
             window.makeKeyAndOrderFront(nil)
@@ -524,6 +551,7 @@ final class AppController: NSObject, ObservableObject, NSPopoverDelegate {
     }
 
     private func handleReturnFromAway() {
+        refreshClockAndDayState()
         defer {
             awayStartedAt = nil
             awayDayKey = nil

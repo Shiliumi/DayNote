@@ -8,7 +8,7 @@ struct MenuBarContentView: View {
 
     var body: some View {
         let palette = controller.palette
-        let now = clock.now
+        let now = store.isTimerRunning ? clock.now : Date()
         let tasks = store.tasks(on: now)
         let elapsed = store.totalElapsed(on: now, at: now)
         let goalMin = store.goalMinutes(on: now)
@@ -50,7 +50,7 @@ struct MenuBarContentView: View {
 
                 if store.isTimerRunning {
                     Button {
-                        store.pauseActiveTimer(at: now)
+                        store.pauseActiveTimer(at: Date())
                         controller.updateStatusBarTitle()
                     } label: {
                         Image(systemName: "pause.fill")
@@ -79,7 +79,8 @@ struct MenuBarContentView: View {
                             let running = store.activeDayKey == TaskStore.dayKey(for: now) && store.activeTaskID == task.id
                             HStack(spacing: 8) {
                                 Button {
-                                    store.toggleCompletion(for: task.id, on: now, at: now)
+                                    let actionNow = Date()
+                                    store.toggleCompletion(for: task.id, on: actionNow, at: actionNow)
                                 } label: {
                                     Image(systemName: task.isCompleted ? "checkmark.circle.fill" : "circle")
                                         .foregroundStyle(task.isCompleted ? palette.accent : .secondary)
@@ -99,7 +100,8 @@ struct MenuBarContentView: View {
                                     .foregroundStyle(running ? palette.accent : .secondary)
 
                                 Button {
-                                    store.toggleTimer(for: task.id, on: now, at: now)
+                                    let actionNow = Date()
+                                    store.toggleTimer(for: task.id, on: actionNow, at: actionNow)
                                     controller.updateStatusBarTitle()
                                 } label: {
                                     Image(systemName: running ? "pause.circle.fill" : "play.circle.fill")
