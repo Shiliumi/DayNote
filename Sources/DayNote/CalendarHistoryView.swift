@@ -303,10 +303,12 @@ struct CalendarHistoryView: View {
                 calendarSelection = date
                 showingTagEditor = true
             }
-            Button("设为首页倒计时") {
-                calendarSelection = date
-                countdownTitleDraft = store.tags(on: date).first?.title ?? ""
-                showingCountdownPopover = true
+            if calendar.startOfDay(for: date) >= calendar.startOfDay(for: Date()) {
+                Button("设为首页倒计时") {
+                    calendarSelection = date
+                    countdownTitleDraft = store.tags(on: date).first?.title ?? ""
+                    showingCountdownPopover = true
+                }
             }
         }
     }
@@ -519,8 +521,9 @@ struct CalendarHistoryView: View {
                                                 .background(Capsule().fill(catColor.opacity(0.12)))
                                         }
                                     }
-                                    if task.elapsedSeconds > 0 {
-                                        Text(ContentView.formatDuration(task.elapsedSeconds))
+                                    let liveElapsed = store.elapsed(for: task, on: calendarSelection, at: Date())
+                                    if liveElapsed > 0 {
+                                        Text(ContentView.formatDuration(liveElapsed))
                                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                                             .foregroundStyle(.secondary)
                                     }

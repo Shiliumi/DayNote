@@ -140,32 +140,19 @@ struct SettingsView: View {
             } else {
                 VStack(spacing: 8) {
                     ForEach(store.categories) { cat in
-                        HStack(spacing: 8) {
-                            categoryColorMenu(
-                                currentColor: cat.colorName,
-                                onSelect: { newColor in
-                                    store.updateCategory(id: cat.id, name: cat.name, colorName: newColor)
-                                }
-                            )
-                            TextField(
-                                "分类名称",
-                                text: Binding(
-                                    get: { cat.name },
-                                    set: { store.updateCategory(id: cat.id, name: $0, colorName: cat.colorName) }
-                                )
-                            )
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12, design: .rounded))
-
-                            Button(role: .destructive) {
+                        CategoryEditRow(
+                            category: cat,
+                            onChangeColor: { newColor in
+                                store.updateCategory(id: cat.id, name: cat.name, colorName: newColor)
+                            },
+                            onCommitName: { newName in
+                                store.updateCategory(id: cat.id, name: newName, colorName: cat.colorName)
+                            },
+                            onDelete: {
                                 store.deleteCategory(id: cat.id)
                                 showStatus("已删除分类「\(cat.name)」，原任务已保留为未分类")
-                            } label: {
-                                Image(systemName: "trash").font(.system(size: 11))
                             }
-                            .buttonStyle(.borderless)
-                            .help("删除分类（不会删除任务）")
-                        }
+                        )
                     }
                 }
             }
@@ -552,5 +539,90 @@ struct SettingsView: View {
         store.autoBackupDirectoryPath = url.path
         store.performAutoBackupIfConfigured(force: true)
         showStatus("已开启自动备份，每次变更会自动同步至 DayNote-AutoBackup.json")
+    }
+}
+
+private struct CategoryEditRow: View {
+    let category: TaskCategory
+    let onChangeColor: (String) -> Void
+    let onCommitName: (String) -> Void
+    let onDelete: () -> Void
+
+    @State private var draftName: String
+    @FocusState private var isFocused: Bool
+
+    init(
+        category: TaskCategory,
+        onChangeColor: @escaping (String) -> Void,
+        onCommitName: @escaping (String) -> Void,
+        onDelete: @escaping () -> Void
+    ) {
+        self.category = category
+        self.onChangeColor = onChangeColor
+        self.onCommitName = onCommitName
+        self.onDelete = onDelete
+        _draftName = State(initialValue: category.name)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Menu {
+                ForEach(CalendarTagPalette.names, id: \.self) { name in
+                    Button {
+                        onChangeColor(name)
+                    } label: {
+                        Label(colorTitle(name), systemImage: category.colorName == name ? "checkmark.circle.fill" : "circle.fill")
+                    }
+                }
+            } label: {
+                Circle()
+                    .fill(CalendarTagPalette.color(named: category.colorName))
+                    .frame(width: 18, height: 18)
+                    .overlay(Circle().stroke(Color.white, lineWidth: 1.5))
+                    .shadow(color: .black.opacity(0.12), radius: 1.5, y: 1)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 26)
+
+            TextField("分类名称", text: $draftName)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .rounded))
+                .focused($isFocused)
+                .onSubmit(commit)
+                .onChange(of: isFocused) {
+                    if !isFocused { commit() }
+                }
+                .onChange(of: category.name) {
+                    if !isFocused && draftName != category.name {
+                        draftName = category.name
+                    }
+                }
+
+            Button(role: .destructive, action: onDelete) {
+                Image(systemName: "trash").font(.system(size: 11))
+            }
+            .buttonStyle(.borderless)
+            .help("删除分类（不会删除任务）")
+        }
+    }
+
+    private func commit() {
+        let cleaned = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.isEmpty {
+            draftName = category.name
+        } else if cleaned != category.name {
+            onCommitName(cleaned)
+        }
+    }
+
+    private func colorTitle(_ name: String) -> String {
+        switch name {
+        case "blue": return "蓝色"
+        case "green": return "绿色"
+        case "purple": return "紫色"
+        case "pink": return "粉色"
+        case "gray": return "灰色"
+        default: return "橙色"
+        }
     }
 }

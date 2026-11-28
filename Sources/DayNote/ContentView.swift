@@ -41,6 +41,18 @@ struct ContentView: View {
         .onChange(of: TaskStore.dayKey(for: now)) {
             handleDayChange(at: now)
         }
+        .onChange(of: selectedDate) {
+            filterCategoryID = nil
+        }
+        .onChange(of: store.categories) {
+            let validIDs = Set(store.categories.map(\.id))
+            if let fid = filterCategoryID, !validIDs.contains(fid) {
+                filterCategoryID = nil
+            }
+            if let nid = newTaskCategoryID, !validIDs.contains(nid) {
+                newTaskCategoryID = nil
+            }
+        }
         .frame(
             minWidth: controller.isMiniMode ? 290 : 356,
             idealWidth: controller.isMiniMode ? 344 : 384,
@@ -851,7 +863,11 @@ struct ContentView: View {
                                 store.applyCategoryToAllTasksNamed(task.title, categoryID: categoryID)
                             },
                             onEdit: {
-                                editingRequest = TaskEditRequest(task: task, date: selectedDate)
+                                editingRequest = TaskEditRequest(
+                                    task: task,
+                                    date: selectedDate,
+                                    initialElapsed: store.elapsed(for: task, on: selectedDate, at: Date())
+                                )
                             },
                             onDelete: {
                                 store.deleteTask(id: task.id, on: selectedDate, at: Date())
@@ -1046,6 +1062,7 @@ struct ContentView: View {
 struct TaskEditRequest: Identifiable {
     let task: DailyTask
     let date: Date
+    let initialElapsed: TimeInterval
     var id: UUID { task.id }
 }
 
@@ -1053,7 +1070,7 @@ private struct TaskEditView: View {
     let request: TaskEditRequest
     let categories: [TaskCategory]
     let accent: Color
-    let onSave: (String, Bool, TimeInterval, Bool, UUID?) -> Void
+    let onSave: (String, Bool, TimeInterval?, Bool, UUID?) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var title: String
@@ -1063,18 +1080,19 @@ private struct TaskEditView: View {
     @State private var totalMinutes: Int
     @State private var hoursText: String
     @State private var minutesText: String
+    @State private var didEditDuration = false
 
     init(
         request: TaskEditRequest,
         categories: [TaskCategory],
         accent: Color,
-        onSave: @escaping (String, Bool, TimeInterval, Bool, UUID?) -> Void
+        onSave: @escaping (String, Bool, TimeInterval?, Bool, UUID?) -> Void
     ) {
         self.request = request
         self.categories = categories
         self.accent = accent
         self.onSave = onSave
-        let mins = max(0, Int(request.task.elapsedSeconds) / 60)
+        let mins = max(0, Int(request.initialElapsed) / 60)
         _title = State(initialValue: request.task.title)
         _isCompleted = State(initialValue: request.task.isCompleted)
         _isRecurring = State(initialValue: request.task.isRecurring)
@@ -1128,12 +1146,18 @@ private struct TaskEditView: View {
                     TextField("0", text: $hoursText)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 60)
-                        .onChange(of: hoursText) { syncFromTextFields() }
+                        .onChange(of: hoursText) {
+                            didEditDuration = true
+                            syncFromTextFields()
+                        }
                     Text("小时")
                     TextField("0", text: $minutesText)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 60)
-                        .onChange(of: minutesText) { syncFromTextFields() }
+                        .onChange(of: minutesText) {
+                            didEditDuration = true
+                            syncFromTextFields()
+                        }
                     Text("分钟")
                     Spacer()
                 }
@@ -1152,8 +1176,14 @@ private struct TaskEditView: View {
                     .keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("保存") {
-                    syncFromTextFields()
-                    onSave(title, isCompleted, TimeInterval(totalMinutes * 60), isRecurring, categoryID)
+                    if didEditDuration { syncFromTextFields() }
+                    onSave(
+                        title,
+                        isCompleted,
+                        didEditDuration ? TimeInterval(totalMinutes * 60) : nil,
+                        isRecurring,
+                        categoryID
+                    )
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -1168,6 +1198,7 @@ private struct TaskEditView: View {
 
     private func quickButton(_ label: String, delta: Int) -> some View {
         Button(label) {
+            didEditDuration = true
             totalMinutes = max(0, min(99 * 60 + 59, totalMinutes + delta))
             hoursText = "\(totalMinutes / 60)"
             minutesText = "\(totalMinutes % 60)"
@@ -1485,15 +1516,41 @@ private struct WindowConfigurator: NSViewRepresentable {
         private var mouseMonitor: Any?
         private var lastMiniMode: Bool?
         private var savedNormalFrame: NSRect?
+        private let normalFrameKey = "daynote.normal-window-frame"
+
+        private func loadSavedNormalSize() -> NSSize {
+            if let str = UserDefaults.standard.string(forKey: normalFrameKey) {
+                let rect = NSRectFromString(str)
+                if rect.width >= 356 && rect.height >= 500 {
+                    return rect.size
+                }
+            }
+            return NSSize(width: 384, height: 610)
+        }
+
+        private func persistNormalFrame(_ frame: NSRect) {
+            guard frame.width >= 356 && frame.height >= 500 else { return }
+            savedNormalFrame = frame
+            UserDefaults.standard.set(NSStringFromRect(frame), forKey: normalFrameKey)
+        }
 
         func applyMiniMode(_ isMini: Bool, to window: NSWindow) {
             if lastMiniMode == nil {
-                window.setFrameAutosaveName("DayNote.MainWindow")
                 lastMiniMode = isMini
                 if isMini {
-                    savedNormalFrame = NSRect(x: window.frame.origin.x, y: window.frame.origin.y, width: 384, height: 610)
+                    window.setFrameAutosaveName("")
+                    let size = loadSavedNormalSize()
+                    savedNormalFrame = NSRect(origin: window.frame.origin, size: size)
                     let topY = window.frame.maxY
                     window.setFrame(NSRect(x: window.frame.origin.x, y: topY - 62, width: 344, height: 62), display: true, animate: false)
+                } else {
+                    window.setFrameAutosaveName("DayNote.MainWindow")
+                    if window.frame.height < 460 || window.frame.width < 340 {
+                        let size = loadSavedNormalSize()
+                        let topY = window.frame.maxY
+                        window.setFrame(NSRect(x: window.frame.origin.x, y: max(40, topY - size.height), width: size.width, height: size.height), display: true, animate: false)
+                    }
+                    persistNormalFrame(window.frame)
                 }
                 return
             }
@@ -1501,12 +1558,13 @@ private struct WindowConfigurator: NSViewRepresentable {
             lastMiniMode = isMini
 
             if isMini {
-                savedNormalFrame = window.frame
+                persistNormalFrame(window.frame)
+                window.setFrameAutosaveName("")
                 let topY = window.frame.maxY
                 let miniFrame = NSRect(x: window.frame.origin.x, y: topY - 62, width: 344, height: 62)
                 window.setFrame(miniFrame, display: true, animate: true)
             } else {
-                let targetSize = savedNormalFrame?.size ?? NSSize(width: 384, height: 610)
+                let targetSize = savedNormalFrame?.size ?? loadSavedNormalSize()
                 let topY = window.frame.maxY
                 let normalFrame = NSRect(
                     x: window.frame.origin.x,
@@ -1515,6 +1573,7 @@ private struct WindowConfigurator: NSViewRepresentable {
                     height: max(500, targetSize.height)
                 )
                 window.setFrame(normalFrame, display: true, animate: true)
+                window.setFrameAutosaveName("DayNote.MainWindow")
             }
         }
 

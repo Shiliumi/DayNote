@@ -69,11 +69,30 @@ struct StoreSmokeTest {
             store.deductAwayTime(taskID: taskA.id, dayKey: TaskStore.dayKey(for: today), seconds: 300, pauseTimer: true, at: today)
             precondition(abs(store.tasks(on: today).first(where: { $0.id == taskA.id })!.elapsedSeconds - 665) < 0.1)
 
-            // 5. Rollover into a fresh future day carries ONLY recurring tasks
+            // 5. Rollover into a fresh future day carries ONLY recurring tasks,
+            //    and EVEN IF a future day already had a pre-planned task, recurring tasks still merge in!
+            store.addTask(title: "提前预约模考", on: nextWeekDay, isRecurring: false)
             store.prepareForCurrentDay(at: nextWeekDay)
             let futureTitles = store.tasks(on: nextWeekDay).map(\.title)
             precondition(futureTitles.contains("任务 A-改"))
+            precondition(futureTitles.contains("提前预约模考"))
             precondition(!futureTitles.contains("任务 B"))
+
+            // 5.5 Editing title/category on a running task without changing duration preserves running timer & seconds
+            store.toggleTimer(for: taskA.id, on: today, at: today)
+            let beforeEdit = store.tasks(on: today).first(where: { $0.id == taskA.id })!.elapsedSeconds
+            store.updateTask(id: taskA.id, on: today, title: "任务 A-改", isCompleted: false, elapsedSeconds: nil, at: today)
+            precondition(store.isTimerRunning && store.activeTaskID == taskA.id)
+            precondition(abs(store.tasks(on: today).first(where: { $0.id == taskA.id })!.elapsedSeconds - beforeEdit) < 0.1)
+            store.pauseActiveTimer(at: today)
+            // Quick-timer resumes last paused task (taskA), not taskB at index 0
+            store.toggleQuickTimer(at: today)
+            precondition(store.activeTaskID == taskA.id)
+            store.pauseActiveTimer(at: today)
+
+            // 5.6 All-time stats exclude future planned dates
+            let allTimeDates = store.allTimeDayStats(at: today).map(\.date)
+            precondition(!allTimeDates.contains { Calendar.autoupdatingCurrent.isDate($0, inSameDayAs: nextWeekDay) })
 
             // 6. Streaks & Weekly stats
             precondition(store.currentStreak(at: today) >= 3)

@@ -96,6 +96,7 @@ final class AppController: NSObject, ObservableObject, NSPopoverDelegate {
     private var awayTaskID: UUID?
     private var awayDayKey: String?
     private var awayTaskTitle: String?
+    private var isScreenLocked = false
 
     private var trackedTimerStart: Date?
     private var lastNotifiedMilestone: Int = 0
@@ -279,6 +280,7 @@ final class AppController: NSObject, ObservableObject, NSPopoverDelegate {
     }
 
     private func evaluatePomodoro(at now: Date) {
+        guard awayStartedAt == nil, sleepPrompt == nil else { return }
         guard pomodoroEnabled, let store, store.isTimerRunning, let started = store.timerStartedAt else {
             resetPomodoroTracking()
             return
@@ -429,6 +431,7 @@ final class AppController: NSObject, ObservableObject, NSPopoverDelegate {
     // MARK: - Focus Reminder
 
     func evaluateFocusReminder(at now: Date) {
+        guard awayStartedAt == nil, sleepPrompt == nil else { return }
         guard !pomodoroEnabled, focusReminderMinutes > 0, let store, store.isTimerRunning, let started = store.timerStartedAt else {
             resetFocusReminderTracking()
             return
@@ -511,7 +514,8 @@ final class AppController: NSObject, ObservableObject, NSPopoverDelegate {
         for name in wakeNames {
             let obs = wsCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in
-                    self?.handleReturnFromAway()
+                    guard let self, !self.isScreenLocked else { return }
+                    self.handleReturnFromAway()
                 }
             }
             workspaceObservers.append(obs)
@@ -524,6 +528,7 @@ final class AppController: NSObject, ObservableObject, NSPopoverDelegate {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
+                self?.isScreenLocked = true
                 self?.recordAwayStart()
             }
         }
@@ -533,6 +538,7 @@ final class AppController: NSObject, ObservableObject, NSPopoverDelegate {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
+                self?.isScreenLocked = false
                 self?.handleReturnFromAway()
             }
         }

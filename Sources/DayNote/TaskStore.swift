@@ -31,10 +31,13 @@ final class TaskStore: ObservableObject {
     private let taskTemplatesKey = "daynote.task-templates.v1"
     private let pomodoroCountsKey = "daynote.pomodoro-counts.v1"
     private let categoriesKey = "daynote.categories.v1"
+    private let rolledOverDaysKey = "daynote.rolled-over-days.v1"
     private let autoBackupDirKey = "daynote.auto-backup-dir"
     private let calendar = Calendar.autoupdatingCurrent
     private let defaults: UserDefaults
     private var lastAutoBackupAt: Date?
+    private var lastActiveTaskID: UUID?
+    private var rolledOverDayKeys: Set<String> = []
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -47,6 +50,7 @@ final class TaskStore: ObservableObject {
         loadTaskTemplates()
         loadPomodoroCounts()
         loadCategories()
+        loadRolledOverDays()
         prepareForCurrentDay(at: Date())
     }
 
@@ -414,7 +418,7 @@ final class TaskStore: ObservableObject {
         on date: Date,
         title: String,
         isCompleted: Bool,
-        elapsedSeconds: TimeInterval,
+        elapsedSeconds: TimeInterval?,
         isRecurring: Bool? = nil,
         categoryID: UUID?? = nil,
         at now: Date = Date()
@@ -424,13 +428,16 @@ final class TaskStore: ObservableObject {
         prepareForCurrentDay(at: now)
 
         let key = Self.dayKey(for: date)
-        if activeDayKey == key, activeTaskID == id {
+        let isThisRunning = (activeDayKey == key && activeTaskID == id)
+        if isThisRunning && (elapsedSeconds != nil || isCompleted) {
             stopActiveTimer(at: now)
         }
         guard var dayTasks = days[key], let index = dayTasks.firstIndex(where: { $0.id == id }) else { return }
         dayTasks[index].title = cleaned
         dayTasks[index].isCompleted = isCompleted
-        dayTasks[index].elapsedSeconds = max(0, elapsedSeconds)
+        if let elapsedSeconds {
+            dayTasks[index].elapsedSeconds = max(0, elapsedSeconds)
+        }
         if let isRecurring {
             dayTasks[index].isRecurring = isRecurring
         }
@@ -469,6 +476,7 @@ final class TaskStore: ObservableObject {
         stopActiveTimer(at: now)
         activeDayKey = key
         activeTaskID = id
+        lastActiveTaskID = id
         timerStartedAt = now
         save()
     }
@@ -484,6 +492,11 @@ final class TaskStore: ObservableObject {
             return
         }
         let todayTasks = tasks(on: now)
+        if let lastID = lastActiveTaskID,
+           let resumed = todayTasks.first(where: { $0.id == lastID && !$0.isCompleted }) {
+            toggleTimer(for: resumed.id, on: now, at: now)
+            return
+        }
         if let candidate = todayTasks.first(where: { !$0.isCompleted }) {
             toggleTimer(for: candidate.id, on: now, at: now)
         }
@@ -539,12 +552,30 @@ final class TaskStore: ObservableObject {
             closeTimerAtDayBoundary(now: date)
         }
 
-        guard days[todayKey] == nil else { return }
-        let template = mostRecentTasks(before: date).filter(\.isRecurring)
-        days[todayKey] = template.map {
-            DailyTask(title: $0.title, isRecurring: true, categoryID: $0.categoryID)
+        if days[todayKey] != nil && rolledOverDayKeys.contains(todayKey) {
+            return
         }
-        save()
+
+        let template = mostRecentTasks(before: date).filter(\.isRecurring)
+        var current = days[todayKey] ?? []
+        let existingTitles = Set(current.map(\.title))
+        var didChange = (days[todayKey] == nil)
+
+        // Prepend recurring tasks that weren't already pre-planned for this day
+        let toAdd = template
+            .filter { !existingTitles.contains($0.title) }
+            .map { DailyTask(title: $0.title, isRecurring: true, categoryID: $0.categoryID) }
+        if !toAdd.isEmpty {
+            current.insert(contentsOf: toAdd, at: 0)
+            didChange = true
+        }
+
+        days[todayKey] = current
+        rolledOverDayKeys.insert(todayKey)
+        saveRolledOverDays()
+        if didChange {
+            save()
+        }
     }
 
     // MARK: - History Search
@@ -614,8 +645,10 @@ final class TaskStore: ObservableObject {
     }
 
     func allTimeDayStats(at now: Date = Date()) -> [DayStats] {
-        days.keys
+        let todayStart = calendar.startOfDay(for: now)
+        return days.keys
             .compactMap { Self.date(fromDayKey: $0) }
+            .filter { calendar.startOfDay(for: $0) <= todayStart }
             .sorted()
             .map { date in
                 let dayTasks = tasks(on: date)
@@ -862,6 +895,11 @@ final class TaskStore: ObservableObject {
         taskTemplates = backup.taskTemplates
         pomodoroCounts = backup.pomodoroCounts
         categories = backup.categories
+        let todayStart = calendar.startOfDay(for: Date())
+        rolledOverDayKeys = Set(days.keys.filter { key in
+            guard let d = Self.date(fromDayKey: key) else { return true }
+            return calendar.startOfDay(for: d) <= todayStart
+        })
         sortCountdowns()
         validateActiveTimer()
         save()
@@ -872,6 +910,7 @@ final class TaskStore: ObservableObject {
         saveTaskTemplates()
         savePomodoroCounts()
         saveCategories()
+        saveRolledOverDays()
     }
 
     func exportCSVString(at now: Date = Date()) -> String {
@@ -1060,6 +1099,25 @@ final class TaskStore: ObservableObject {
             let items = try? JSONDecoder().decode([TaskCategory].self, from: data)
         else { return }
         categories = items
+    }
+
+    private func loadRolledOverDays() {
+        if let saved = defaults.stringArray(forKey: rolledOverDaysKey) {
+            rolledOverDayKeys = Set(saved)
+        } else {
+            // Seed with existing past/today keys so historical days are never altered,
+            // while future pre-planned days still receive recurring tasks when that day arrives.
+            let todayStart = calendar.startOfDay(for: Date())
+            rolledOverDayKeys = Set(days.keys.filter { key in
+                guard let d = Self.date(fromDayKey: key) else { return true }
+                return calendar.startOfDay(for: d) <= todayStart
+            })
+            saveRolledOverDays()
+        }
+    }
+
+    private func saveRolledOverDays() {
+        defaults.set(Array(rolledOverDayKeys), forKey: rolledOverDaysKey)
     }
 
     private func saveDailyGoals() {
